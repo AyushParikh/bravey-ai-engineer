@@ -32,7 +32,7 @@ jobs:
           --parameter-overrides
           DatabaseUrl=${{ secrets.DATABASE_URL }}
           EncryptionKey=${{ secrets.ENCRYPTION_KEY }}
-          GitHubAppId=${{ secrets.GITHUB_APP_ID }}
-          GitHubAppPrivateKey=${{ secrets.GITHUB_APP_PRIVATE_KEY }}
-          GitHubWebhookSecret=${{ secrets.GITHUB_WEBHOOK_SECRET }}
+          GitHubAppId=${{ secrets.GH_APP_ID }}
+          GitHubAppPrivateKey=${{ secrets.GH_APP_PRIVATE_KEY }}
+          GitHubWebhookSecret=${{ secrets.GH_WEBHOOK_SECRET }}
           AnthropicApiKey=${{ secrets.ANTHROPIC_API_KEY }}

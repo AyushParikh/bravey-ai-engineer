@@ -1,6 +1,8 @@
+version = 0.1
+
 [default.deploy.parameters]
 stack_name = "bravey-engineer-backend"
 resolve_s3 = true
 capabilities = "CAPABILITY_IAM"
 region = "us-east-1"
-confirm_changeset = true
+confirm_changeset = false

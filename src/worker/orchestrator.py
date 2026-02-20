@@ -1,8 +1,6 @@
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-import httpx
 from sqlalchemy import select
 
 from src.database import SyncSessionLocal
@@ -99,9 +97,7 @@ def _execute_pipeline(db, run_id: str) -> None:
     try:
         # Step 3: Fetch full Linear issue context
         _log(db, run.id, LogLevel.info, "Fetching Linear issue context")
-        issue = asyncio.run(
-            fetch_issue(org.linear_access_token, run.linear_issue_id)
-        )
+        issue = fetch_issue(org.linear_access_token, run.linear_issue_id)
         run.linear_issue_title = issue.get("title", run.linear_issue_title)
         run.linear_issue_url = issue.get("url", run.linear_issue_url)
         db.commit()
@@ -159,35 +155,23 @@ def _execute_pipeline(db, run_id: str) -> None:
         run.branch_name = branch_name
         db.commit()
 
-        # Step 7: Provision ephemeral container + Step 8: Claude Code runs
-        _log(db, run.id, LogLevel.info, "Provisioning container and running Claude Code")
-        clone_url = f"https://x-access-token:{gh_token}@github.com/{repo.full_name}.git"
+        # Step 7: Run Claude agent via Anthropic API
+        _log(db, run.id, LogLevel.info, "Running Claude agent via Anthropic API")
 
         result = agent_service.provision_and_run(
-            repo_clone_url=clone_url,
+            gh_token=gh_token,
+            owner=repo.github_owner,
+            repo_name=repo.github_repo_name,
             branch_name=branch_name,
+            base_sha=head_sha,
             issue_context=issue_context,
         )
-        run.container_id = result.container_id
         run.claude_session_id = result.claude_session_id
         run.claude_summary = result.summary
         db.commit()
 
         if not result.success:
             raise RuntimeError(result.error or "Agent run failed")
-
-        # Stub mode: create a dummy commit so the PR can be opened
-        if result.container_id.startswith("stub-"):
-            _log(db, run.id, LogLevel.info, "Stub mode: creating placeholder commit")
-            commit_sha = github_service.create_stub_commit(
-                token=gh_token,
-                owner=repo.github_owner,
-                repo=repo.github_repo_name,
-                branch_name=branch_name,
-                base_sha=head_sha,
-            )
-            run.pr_sha = commit_sha
-            db.commit()
 
         # Step 9: Open GitHub Pull Request
         _log(db, run.id, LogLevel.info, "Opening pull request")
@@ -197,7 +181,7 @@ def _execute_pipeline(db, run_id: str) -> None:
             f"{result.summary or 'No summary available.'}\n\n"
             f"**Linear issue:** [{run.linear_issue_identifier}]({run.linear_issue_url})\n\n"
             f"---\n"
-            f"*This PR was opened by [Bravey](https://bravey.dev)*"
+            f"*This PR was opened by [Bravey](https://bravey.co)*"
         )
 
         pr = github_service.create_pull_request(
@@ -227,12 +211,10 @@ def _execute_pipeline(db, run_id: str) -> None:
         _log(db, run.id, LogLevel.info, "Updating Linear issue")
         if org.linear_access_token and org.linear_in_review_state_id:
             try:
-                asyncio.run(
-                    update_issue_state(
-                        org.linear_access_token,
-                        run.linear_issue_id,
-                        org.linear_in_review_state_id,
-                    )
+                update_issue_state(
+                    org.linear_access_token,
+                    run.linear_issue_id,
+                    org.linear_in_review_state_id,
                 )
 
                 comment_body = (
@@ -241,12 +223,10 @@ def _execute_pipeline(db, run_id: str) -> None:
                     f"**Branch:** `{branch_name}`\n\n"
                     f"Changes made:\n{result.summary or 'See PR for details.'}"
                 )
-                asyncio.run(
-                    create_comment(
-                        org.linear_access_token,
-                        run.linear_issue_id,
-                        comment_body,
-                    )
+                create_comment(
+                    org.linear_access_token,
+                    run.linear_issue_id,
+                    comment_body,
                 )
             except Exception:
                 logger.exception("Failed to update Linear issue")

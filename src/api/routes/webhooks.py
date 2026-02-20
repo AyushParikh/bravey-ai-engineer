@@ -82,11 +82,20 @@ async def linear_webhook(
     db.add(event)
     await db.flush()
 
-    # Check trigger condition: assigned to Bravey bot user
+    # Check trigger condition: assignee just changed TO the Bravey bot user.
+    # We require updatedFrom to contain an assigneeId field (meaning the
+    # assignee actually changed), and the *previous* assignee must not have
+    # been the bot. This prevents re-triggering when the bot itself updates
+    # the issue state/comments (which also fires an "update" webhook but
+    # without an assigneeId in updatedFrom).
+    assignee_changed = (
+        payload.updatedFrom is not None
+        and "assigneeId" in (payload.updatedFrom.model_fields_set or set())
+    )
     triggered = (
         payload.action == "update"
         and payload.data.assigneeId == org.linear_bravey_user_id
-        and payload.updatedFrom is not None
+        and assignee_changed
         and payload.updatedFrom.assigneeId != org.linear_bravey_user_id
     )
 
@@ -107,11 +116,20 @@ async def linear_webhook(
         await db.commit()
         return Response(status_code=200, content="OK - concurrent processing")
 
+    from datetime import datetime, timedelta, timezone
+
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
     existing_run = await db.execute(
         select(AgentRun).where(
             AgentRun.org_id == org.id,
             AgentRun.linear_issue_id == payload.data.id,
-            AgentRun.status.in_(["queued", "running"]),
+            (
+                AgentRun.status.in_(["queued", "running"])
+                | (
+                    (AgentRun.status == "success")
+                    & (AgentRun.completed_at >= recent_cutoff)
+                )
+            ),
         )
     )
     if existing_run.scalar_one_or_none():
@@ -151,21 +169,11 @@ async def linear_webhook(
     event.processed = True
     await db.commit()
 
-    # Enqueue to SQS (or run inline in local dev mode)
-    if settings.local_dev:
-        import threading
-        from src.worker.orchestrator import run_pipeline
-
-        print(f"[BRAVEY] Starting pipeline for run {run.id}", flush=True)
-        thread = threading.Thread(
-            target=run_pipeline, args=(str(run.id),), daemon=True
-        )
-        thread.start()
-    else:
-        try:
-            sqs_service.send_run_message(str(run.id))
-        except Exception:
-            logger.exception(f"Failed to enqueue run {run.id} to SQS")
+    # Enqueue to SQS
+    try:
+        sqs_service.send_run_message(str(run.id))
+    except Exception:
+        logger.exception(f"Failed to enqueue run {run.id} to SQS")
 
     return Response(status_code=200, content="OK")
 

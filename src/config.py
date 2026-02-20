@@ -31,9 +31,6 @@ class Settings(BaseSettings):
     # AWS region
     aws_region: str = "us-east-1"
 
-    # Local dev mode — bypasses SQS, runs worker inline
-    local_dev: bool = False
-
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @property

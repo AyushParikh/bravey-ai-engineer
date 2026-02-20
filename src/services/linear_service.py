@@ -19,21 +19,20 @@ def verify_timestamp(webhook_timestamp_ms: int, max_age_ms: int = 60_000) -> boo
     return abs(now_ms - webhook_timestamp_ms) <= max_age_ms
 
 
-async def graphql_request(
+def graphql_request(
     access_token: str, query: str, variables: dict | None = None
 ) -> dict:
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            LINEAR_API_URL,
-            json={"query": query, "variables": variables or {}},
-            headers={
-                "Authorization": access_token,
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    resp = httpx.post(
+        LINEAR_API_URL,
+        json={"query": query, "variables": variables or {}},
+        headers={
+            "Authorization": access_token,
+            "Content-Type": "application/json",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 FETCH_ISSUE_QUERY = """
@@ -58,8 +57,8 @@ query GetIssue($id: String!) {
 """
 
 
-async def fetch_issue(access_token: str, issue_id: str) -> dict:
-    result = await graphql_request(
+def fetch_issue(access_token: str, issue_id: str) -> dict:
+    result = graphql_request(
         access_token, FETCH_ISSUE_QUERY, {"id": issue_id}
     )
     return result.get("data", {}).get("issue", {})
@@ -75,10 +74,10 @@ mutation UpdateIssue($id: String!, $stateId: String!) {
 """
 
 
-async def update_issue_state(
+def update_issue_state(
     access_token: str, issue_id: str, state_id: str
 ) -> dict:
-    return await graphql_request(
+    return graphql_request(
         access_token,
         UPDATE_ISSUE_STATE_MUTATION,
         {"id": issue_id, "stateId": state_id},
@@ -95,10 +94,10 @@ mutation CommentCreate($issueId: String!, $body: String!) {
 """
 
 
-async def create_comment(
+def create_comment(
     access_token: str, issue_id: str, body: str
 ) -> dict:
-    return await graphql_request(
+    return graphql_request(
         access_token,
         CREATE_COMMENT_MUTATION,
         {"issueId": issue_id, "body": body},

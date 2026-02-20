@@ -82,6 +82,9 @@ Resources:
       Handler: src.worker.handler.handler
       Timeout: 900
       MemorySize: 1024
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt WorkerQueue.QueueName
       Events:
         SQSEvent:
           Type: SQS

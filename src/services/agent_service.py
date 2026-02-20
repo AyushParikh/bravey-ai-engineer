@@ -1,152 +1,457 @@
-"""Agent service — clones the repo and runs Claude Code CLI."""
+"""Agent service — calls Claude API with GitHub-based tools."""
 
-import os
-import shutil
-import subprocess
-import tempfile
+import base64
+import json
+import logging
 import uuid
+
+import httpx
+from anthropic import Anthropic
+
+from src.config import settings
+
+logger = logging.getLogger(__name__)
+
+GITHUB_API_URL = "https://api.github.com"
+GITHUB_HEADERS_BASE = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+
+MAX_TOOL_TURNS = 50
+MODEL = "claude-sonnet-4-20250514"
 
 
 class AgentResult:
     def __init__(
         self,
         success: bool,
-        container_id: str,
         claude_session_id: str | None = None,
         summary: str | None = None,
         error: str | None = None,
     ):
         self.success = success
-        self.container_id = container_id
         self.claude_session_id = claude_session_id
         self.summary = summary
         self.error = error
 
 
-def provision_and_run(
-    repo_clone_url: str,
+# ---------------------------------------------------------------------------
+# GitHub helper functions (used as tool implementations)
+# ---------------------------------------------------------------------------
+
+def _gh_headers(token: str) -> dict:
+    return {**GITHUB_HEADERS_BASE, "Authorization": f"Bearer {token}"}
+
+
+def _gh_read_file(token: str, owner: str, repo: str, path: str, ref: str) -> str:
+    """Read a single file's content from the repo."""
+    resp = httpx.get(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{path}",
+        params={"ref": ref},
+        headers=_gh_headers(token),
+        timeout=15,
+    )
+    if resp.status_code == 404:
+        return f"Error: File not found: {path}"
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("type") != "file":
+        return f"Error: {path} is a {data.get('type')}, not a file"
+    content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+    return content
+
+
+def _gh_list_files(token: str, owner: str, repo: str, path: str, ref: str) -> str:
+    """List files/directories at a given path."""
+    resp = httpx.get(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{path}",
+        params={"ref": ref},
+        headers=_gh_headers(token),
+        timeout=15,
+    )
+    if resp.status_code == 404:
+        return f"Error: Path not found: {path}"
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict):
+        return f"{data['name']} ({data['type']})"
+    entries = []
+    for item in data:
+        suffix = "/" if item["type"] == "dir" else ""
+        entries.append(f"{item['name']}{suffix}")
+    return "\n".join(sorted(entries))
+
+
+def _gh_search_files(token: str, owner: str, repo: str, query: str) -> str:
+    """Search for code in the repo using GitHub code search."""
+    resp = httpx.get(
+        f"{GITHUB_API_URL}/search/code",
+        params={"q": f"{query} repo:{owner}/{repo}"},
+        headers=_gh_headers(token),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    items = data.get("items", [])
+    if not items:
+        return "No results found."
+    results = []
+    for item in items[:20]:
+        results.append(item["path"])
+    return "\n".join(results)
+
+
+def _gh_create_or_update_file(
+    token: str, owner: str, repo: str, path: str, content: str, branch: str,
+    message: str,
+) -> str:
+    """Create or update a file on the branch via the GitHub Contents API."""
+    # Check if file exists to get its SHA (needed for updates)
+    existing_sha = None
+    check_resp = httpx.get(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{path}",
+        params={"ref": branch},
+        headers=_gh_headers(token),
+        timeout=15,
+    )
+    if check_resp.status_code == 200:
+        existing_sha = check_resp.json().get("sha")
+
+    body = {
+        "message": message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "branch": branch,
+    }
+    if existing_sha:
+        body["sha"] = existing_sha
+
+    resp = httpx.put(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{path}",
+        json=body,
+        headers=_gh_headers(token),
+        timeout=15,
+    )
+    resp.raise_for_status()
+    commit_sha = resp.json().get("commit", {}).get("sha", "unknown")
+    action = "Updated" if existing_sha else "Created"
+    return f"{action} {path} (commit: {commit_sha[:8]})"
+
+
+def _gh_delete_file(
+    token: str, owner: str, repo: str, path: str, branch: str, message: str,
+) -> str:
+    """Delete a file on the branch via the GitHub Contents API."""
+    # Get the file SHA
+    check_resp = httpx.get(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{path}",
+        params={"ref": branch},
+        headers=_gh_headers(token),
+        timeout=15,
+    )
+    if check_resp.status_code == 404:
+        return f"Error: File not found: {path}"
+    check_resp.raise_for_status()
+    file_sha = check_resp.json()["sha"]
+
+    resp = httpx.delete(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{path}",
+        json={
+            "message": message,
+            "sha": file_sha,
+            "branch": branch,
+        },
+        headers=_gh_headers(token),
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return f"Deleted {path}"
+
+
+# ---------------------------------------------------------------------------
+# Tool definitions for the Claude API
+# ---------------------------------------------------------------------------
+
+TOOLS = [
+    {
+        "name": "read_file",
+        "description": (
+            "Read the contents of a file from the repository. "
+            "Returns the full file content as text."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to repo root (e.g. 'src/main.py')",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "list_files",
+        "description": (
+            "List files and directories at a given path in the repository. "
+            "Use empty string or '.' for the root directory."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory path relative to repo root",
+                    "default": "",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "search_files",
+        "description": (
+            "Search for code in the repository using GitHub code search. "
+            "Returns a list of file paths matching the query."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query (code, function names, etc.)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": (
+            "Create or update a file in the repository. Each call creates a commit. "
+            "Provide the COMPLETE file content — this replaces the entire file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to repo root",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The complete file content to write",
+                },
+                "commit_message": {
+                    "type": "string",
+                    "description": "Short commit message describing the change",
+                },
+            },
+            "required": ["path", "content", "commit_message"],
+        },
+    },
+    {
+        "name": "delete_file",
+        "description": "Delete a file from the repository. Creates a commit.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to repo root",
+                },
+                "commit_message": {
+                    "type": "string",
+                    "description": "Short commit message describing the deletion",
+                },
+            },
+            "required": ["path", "commit_message"],
+        },
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Tool dispatch
+# ---------------------------------------------------------------------------
+
+def _execute_tool(
+    tool_name: str,
+    tool_input: dict,
+    gh_token: str,
+    owner: str,
+    repo_name: str,
     branch_name: str,
+) -> str:
+    """Execute a tool call and return the result as a string."""
+    try:
+        if tool_name == "read_file":
+            return _gh_read_file(
+                gh_token, owner, repo_name, tool_input["path"], branch_name
+            )
+        elif tool_name == "list_files":
+            return _gh_list_files(
+                gh_token, owner, repo_name, tool_input.get("path", ""), branch_name
+            )
+        elif tool_name == "search_files":
+            return _gh_search_files(
+                gh_token, owner, repo_name, tool_input["query"]
+            )
+        elif tool_name == "write_file":
+            return _gh_create_or_update_file(
+                gh_token, owner, repo_name,
+                tool_input["path"], tool_input["content"], branch_name,
+                tool_input["commit_message"],
+            )
+        elif tool_name == "delete_file":
+            return _gh_delete_file(
+                gh_token, owner, repo_name,
+                tool_input["path"], branch_name,
+                tool_input["commit_message"],
+            )
+        else:
+            return f"Error: Unknown tool '{tool_name}'"
+    except httpx.HTTPStatusError as e:
+        return f"Error ({e.response.status_code}): {e.response.text[:500]}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def provision_and_run(
+    gh_token: str,
+    owner: str,
+    repo_name: str,
+    branch_name: str,
+    base_sha: str,
     issue_context: str,
-    timeout_seconds: int = 1800,
+    max_turns: int = MAX_TOOL_TURNS,
 ) -> AgentResult:
-    """Clone repo, run Claude Code CLI, and return results."""
-    run_id = uuid.uuid4().hex[:12]
-    work_dir = tempfile.mkdtemp(prefix=f"bravey-{run_id}-")
+    """Run Claude agent via Anthropic API with GitHub-based tools."""
+    session_id = uuid.uuid4().hex[:12]
+
+    system_prompt = (
+        "You are Bravey, an AI coding agent. You have access to a GitHub repository "
+        f"({owner}/{repo_name}) on branch `{branch_name}`.\n\n"
+        "You can read files, list directories, search code, and write/delete files. "
+        "Each write_file or delete_file call creates a git commit automatically.\n\n"
+        "Your workflow:\n"
+        "1. Start by listing the repo root to understand the project structure\n"
+        "2. Read relevant files to understand the codebase\n"
+        "3. Implement the changes needed to address the issue\n"
+        "4. Write tests if appropriate\n"
+        "5. When finished, provide a brief summary of what you changed (3-5 bullet points)\n\n"
+        "IMPORTANT:\n"
+        "- Always read a file before modifying it\n"
+        "- When writing a file, provide the COMPLETE file content\n"
+        "- Use descriptive commit messages\n"
+        "- Do NOT open a PR — that will be handled for you\n"
+    )
+
+    user_message = (
+        f"You have been assigned the following Linear issue:\n\n"
+        f"{issue_context}\n\n"
+        f"Please implement the changes needed to address this issue."
+    )
+
+    client = Anthropic(api_key=settings.anthropic_api_key)
+
+    messages = [{"role": "user", "content": user_message}]
 
     try:
-        print(f"[BRAVEY] Cloning repo to {work_dir}", flush=True)
+        for turn in range(max_turns):
+            logger.info(f"[BRAVEY] Agent turn {turn + 1}/{max_turns}")
 
-        # Clone the repo
-        clone_result = subprocess.run(
-            ["git", "clone", "--depth", "1", "-b", branch_name, repo_clone_url, work_dir + "/repo"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if clone_result.returncode != 0:
-            return AgentResult(
-                success=False,
-                container_id=f"local-{run_id}",
-                error=f"Git clone failed: {clone_result.stderr}",
+            response = client.messages.create(
+                model=MODEL,
+                max_tokens=16384,
+                system=system_prompt,
+                tools=TOOLS,
+                messages=messages,
             )
 
-        repo_dir = os.path.join(work_dir, "repo")
+            # Check if we're done (no tool use)
+            if response.stop_reason == "end_turn":
+                # Extract text summary from the final response
+                summary = ""
+                for block in response.content:
+                    if block.type == "text":
+                        summary += block.text
+                return AgentResult(
+                    success=True,
+                    claude_session_id=f"session-{session_id}",
+                    summary=summary or "Agent completed but produced no summary.",
+                )
 
-        # Build the prompt for Claude
-        prompt = (
-            f"You are Bravey, an AI coding agent. You have been assigned the following Linear issue:\n\n"
-            f"{issue_context}\n\n"
-            f"Your job:\n"
-            f"1. Read the codebase to understand the relevant code\n"
-            f"2. Implement a fix/feature that addresses the issue description\n"
-            f"3. Write or update tests as needed\n"
-            f"4. Commit your changes with descriptive commit messages\n"
-            f"5. When done, output a brief summary of what you changed (3-5 bullet points)\n\n"
-            f"Do not open a PR — that will be handled for you.\n"
-            f"Branch `{branch_name}` is already checked out.\n"
-            f"IMPORTANT: You MUST commit and push your changes before finishing."
-        )
+            # Process tool calls
+            if response.stop_reason == "tool_use":
+                # Build assistant message with all content blocks
+                assistant_content = []
+                tool_results = []
 
-        print(f"[BRAVEY] Running Claude Code in {repo_dir}", flush=True)
+                for block in response.content:
+                    if block.type == "text":
+                        assistant_content.append({
+                            "type": "text",
+                            "text": block.text,
+                        })
+                    elif block.type == "tool_use":
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        })
 
-        # Run Claude Code CLI (unset CLAUDECODE to avoid nested session detection)
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        claude_result = subprocess.run(
-            ["claude", "-p", prompt, "--allowedTools", "Bash,Read,Write,Edit,Glob,Grep"],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            cwd=repo_dir,
-            env=env,
-        )
+                        logger.info(
+                            f"[BRAVEY] Tool call: {block.name}("
+                            f"{json.dumps(block.input)[:200]})"
+                        )
 
-        print(f"[BRAVEY] Claude exit code: {claude_result.returncode}", flush=True)
-        if claude_result.stdout:
-            print(f"[BRAVEY] Claude stdout (first 500): {claude_result.stdout[:500]}", flush=True)
-        if claude_result.stderr:
-            print(f"[BRAVEY] Claude stderr (first 500): {claude_result.stderr[:500]}", flush=True)
+                        result_text = _execute_tool(
+                            block.name, block.input,
+                            gh_token, owner, repo_name, branch_name,
+                        )
 
-        summary = claude_result.stdout.strip() if claude_result.stdout else None
+                        # Truncate very large results
+                        if len(result_text) > 50000:
+                            result_text = result_text[:50000] + "\n... (truncated)"
 
-        # Push any commits
-        push_result = subprocess.run(
-            ["git", "push", "origin", branch_name],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            cwd=repo_dir,
-        )
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result_text,
+                        })
 
-        if push_result.returncode != 0:
-            print(f"[BRAVEY] Push output: {push_result.stderr}", flush=True)
+                messages.append({"role": "assistant", "content": assistant_content})
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                # Unexpected stop reason
+                summary = ""
+                for block in response.content:
+                    if block.type == "text":
+                        summary += block.text
+                return AgentResult(
+                    success=True,
+                    claude_session_id=f"session-{session_id}",
+                    summary=summary or "Agent stopped unexpectedly.",
+                )
 
-        if claude_result.returncode != 0:
-            return AgentResult(
-                success=False,
-                container_id=f"local-{run_id}",
-                error=f"Claude Code failed (exit {claude_result.returncode}): {claude_result.stderr[:500] if claude_result.stderr else 'No error output'}",
-                summary=summary,
-            )
-
-        # Check if there are actual commits to push
-        log_result = subprocess.run(
-            ["git", "log", f"origin/{branch_name}..HEAD", "--oneline"],
-            capture_output=True, text=True, timeout=10, cwd=repo_dir,
-        )
-        has_commits = bool(log_result.stdout.strip()) if log_result.returncode == 0 else False
-
-        if not has_commits and push_result.returncode != 0:
-            # Claude didn't make any commits — use stub commit as fallback
-            print("[BRAVEY] No commits from Claude, will use stub commit", flush=True)
-            return AgentResult(
-                success=True,
-                container_id=f"stub-{run_id}",
-                claude_session_id=f"session-{run_id}",
-                summary=summary or "Claude ran but made no changes.",
-            )
-
-        return AgentResult(
-            success=True,
-            container_id=f"local-{run_id}",
-            claude_session_id=f"session-{run_id}",
-            summary=summary,
-        )
-
-    except subprocess.TimeoutExpired:
+        # Exhausted max turns
         return AgentResult(
             success=False,
-            container_id=f"local-{run_id}",
-            error=f"Claude Code timed out after {timeout_seconds} seconds",
+            claude_session_id=f"session-{session_id}",
+            error=f"Agent exhausted maximum {max_turns} tool turns without completing.",
+            summary="Agent ran out of turns before completing the task.",
         )
+
     except Exception as e:
+        logger.exception(f"Agent run failed: {e}")
         return AgentResult(
             success=False,
-            container_id=f"local-{run_id}",
+            claude_session_id=f"session-{session_id}",
             error=str(e),
         )
-    finally:
-        # Clean up work directory
-        try:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        except Exception:
-            pass

@@ -31,7 +31,7 @@ Authorization: Bearer {linear_oauth_access_token}
 
 mutation WebhookCreate {
   webhookCreate(input: {
-    url: "https://api.bravey.dev/webhooks/linear"
+    url: "https://api.bravey.co/webhooks/linear"
     resourceTypes: ["Issue"]
     secret: "{randomly_generated_per_org_secret}"
   }) {
@@ -219,7 +219,7 @@ Changes made:
 - Fixed null check in `src/middleware/auth.ts` line 47
 - Added test case for expired token scenario
 
-[View Bravey run log](https://app.bravey.dev/runs/run-uuid)
+[View Bravey run log](https://app.bravey.co/runs/run-uuid)
 ```
 
 ---
@@ -316,7 +316,7 @@ Content-Type: application/json
 
 {
   "title": "ENG-42: Fix null pointer in auth middleware",
-  "body": "## Summary\n\nFixes null pointer exception in auth middleware when token is expired.\n\n**Linear issue:** [ENG-42](https://linear.app/yourorg/issue/ENG-42)\n\n## Changes\n- Added null check before token validation in `src/middleware/auth.ts`\n- Added test case for expired token scenario\n\n---\n*This PR was opened by [Bravey](https://bravey.dev) 🤖*",
+  "body": "## Summary\n\nFixes null pointer exception in auth middleware when token is expired.\n\n**Linear issue:** [ENG-42](https://linear.app/yourorg/issue/ENG-42)\n\n## Changes\n- Added null check before token validation in `src/middleware/auth.ts`\n- Added test case for expired token scenario\n\n---\n*This PR was opened by [Bravey](https://bravey.co) 🤖*",
   "head": "bravey/ENG-42-fix-null-pointer-in-auth-middleware",
   "base": "main",
   "draft": false
@@ -445,7 +445,7 @@ On failure, update the message with:
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": "❌ *Bravey failed on <https://linear.app/yourorg/issue/ENG-42|ENG-42>*\n\nError: `Claude Code timed out after 30 minutes`\n\n<https://app.bravey.dev/runs/run-uuid|View run log>"
+        "text": "❌ *Bravey failed on <https://linear.app/yourorg/issue/ENG-42|ENG-42>*\n\nError: `Claude Code timed out after 30 minutes`\n\n<https://app.bravey.co/runs/run-uuid|View run log>"
       }
     }
   ]
@@ -551,7 +551,7 @@ On failure, update the message with:
 
 ### Step 1 — Linear fires webhook
 
-Linear POSTs to `POST https://api.bravey.dev/webhooks/linear`.
+Linear POSTs to `POST https://api.bravey.co/webhooks/linear`.
 
 Your handler:
 1. Read raw request body as bytes (do not parse JSON first — needed for HMAC verification)

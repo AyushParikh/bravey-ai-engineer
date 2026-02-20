@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Bravey Engineer Backend
+
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 512
+    Environment:
+      Variables:
+        DATABASE_URL: !Ref DatabaseUrl
+        ENCRYPTION_KEY: !Ref EncryptionKey
+        SQS_QUEUE_URL: !Ref WorkerQueue
+        GITHUB_APP_ID: !Ref GitHubAppId
+        GITHUB_APP_PRIVATE_KEY: !Ref GitHubAppPrivateKey
+        GITHUB_WEBHOOK_SECRET: !Ref GitHubWebhookSecret
+        ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+
+Parameters:
+  DatabaseUrl:
+    Type: String
+    NoEcho: true
+  EncryptionKey:
+    Type: String
+    NoEcho: true
+  GitHubAppId:
+    Type: String
+    Default: ""
+  GitHubAppPrivateKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+  GitHubWebhookSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+
+Resources:
+  # --- SQS Queues ---
+  WorkerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: bravey-worker-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  WorkerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: bravey-worker-queue
+      VisibilityTimeout: 960  # 16 minutes (> worker timeout)
+      MessageRetentionPeriod: 86400  # 1 day
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt WorkerDLQ.Arn
+        maxReceiveCount: 3
+
+  # --- API Lambda ---
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bravey-api
+      Handler: src.api.app.handler
+      Timeout: 29
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt WorkerQueue.QueueName
+      Events:
+        ApiGateway:
+          Type: HttpApi
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+
+  # --- Worker Lambda ---
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bravey-worker
+      Handler: src.worker.handler.handler
+      Timeout: 900
+      MemorySize: 1024
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt WorkerQueue.Arn
+            BatchSize: 1
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway URL
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  WorkerQueueUrl:
+    Description: SQS Queue URL
+    Value: !Ref WorkerQueue

@@ -25,14 +25,22 @@ jobs:
 
       - run: sam build
 
-      - run: >
-          sam deploy
-          --no-confirm-changeset
-          --no-fail-on-empty-changeset
-          --parameter-overrides
-          DatabaseUrl=${{ secrets.DATABASE_URL }}
-          EncryptionKey=${{ secrets.ENCRYPTION_KEY }}
-          GitHubAppId=${{ secrets.GH_APP_ID }}
-          GitHubAppPrivateKey=${{ secrets.GH_APP_PRIVATE_KEY }}
-          GitHubWebhookSecret=${{ secrets.GH_WEBHOOK_SECRET }}
-          AnthropicApiKey=${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Deploy to AWS
+        env:
+          PARAM_DB_URL: ${{ secrets.DATABASE_URL }}
+          PARAM_ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          PARAM_GH_APP_ID: ${{ secrets.GH_APP_ID }}
+          PARAM_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          PARAM_GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          PARAM_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+            "DatabaseUrl=$PARAM_DB_URL" \
+            "EncryptionKey=$PARAM_ENCRYPTION_KEY" \
+            "GitHubAppId=$PARAM_GH_APP_ID" \
+            "GitHubAppPrivateKey=$PARAM_GH_APP_PRIVATE_KEY" \
+            "GitHubWebhookSecret=$PARAM_GH_WEBHOOK_SECRET" \
+            "AnthropicApiKey=$PARAM_ANTHROPIC_API_KEY"

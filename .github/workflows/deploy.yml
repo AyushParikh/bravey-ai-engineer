@@ -41,20 +41,21 @@ jobs:
           PARAM_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PARAM_FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
         run: |
+          OVERRIDES="DatabaseUrl=$PARAM_DB_URL"
+          OVERRIDES="$OVERRIDES EncryptionKey=$PARAM_ENCRYPTION_KEY"
+          [ -n "$PARAM_JWT_SECRET_KEY" ]       && OVERRIDES="$OVERRIDES JwtSecretKey=$PARAM_JWT_SECRET_KEY"
+          [ -n "$PARAM_GH_OAUTH_CLIENT_ID" ]   && OVERRIDES="$OVERRIDES GitHubOAuthClientId=$PARAM_GH_OAUTH_CLIENT_ID"
+          [ -n "$PARAM_GH_OAUTH_CLIENT_SECRET" ] && OVERRIDES="$OVERRIDES GitHubOAuthClientSecret=$PARAM_GH_OAUTH_CLIENT_SECRET"
+          [ -n "$PARAM_GH_APP_ID" ]            && OVERRIDES="$OVERRIDES GitHubAppId=$PARAM_GH_APP_ID"
+          [ -n "$PARAM_GH_APP_PRIVATE_KEY" ]   && OVERRIDES="$OVERRIDES GitHubAppPrivateKey=$PARAM_GH_APP_PRIVATE_KEY"
+          [ -n "$PARAM_GH_WEBHOOK_SECRET" ]    && OVERRIDES="$OVERRIDES GitHubWebhookSecret=$PARAM_GH_WEBHOOK_SECRET"
+          [ -n "$PARAM_LINEAR_CLIENT_ID" ]     && OVERRIDES="$OVERRIDES LinearClientId=$PARAM_LINEAR_CLIENT_ID"
+          [ -n "$PARAM_LINEAR_CLIENT_SECRET" ]  && OVERRIDES="$OVERRIDES LinearClientSecret=$PARAM_LINEAR_CLIENT_SECRET"
+          [ -n "$PARAM_LINEAR_REDIRECT_URI" ]  && OVERRIDES="$OVERRIDES LinearRedirectUri=$PARAM_LINEAR_REDIRECT_URI"
+          [ -n "$PARAM_ANTHROPIC_API_KEY" ]    && OVERRIDES="$OVERRIDES AnthropicApiKey=$PARAM_ANTHROPIC_API_KEY"
+          [ -n "$PARAM_FRONTEND_URL" ]         && OVERRIDES="$OVERRIDES FrontendUrl=$PARAM_FRONTEND_URL"
+
           sam deploy \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
-            --parameter-overrides \
-            "DatabaseUrl=$PARAM_DB_URL" \
-            "EncryptionKey=$PARAM_ENCRYPTION_KEY" \
-            "JwtSecretKey=$PARAM_JWT_SECRET_KEY" \
-            "GitHubOAuthClientId=$PARAM_GH_OAUTH_CLIENT_ID" \
-            "GitHubOAuthClientSecret=$PARAM_GH_OAUTH_CLIENT_SECRET" \
-            "GitHubAppId=$PARAM_GH_APP_ID" \
-            "GitHubAppPrivateKey=$PARAM_GH_APP_PRIVATE_KEY" \
-            "GitHubWebhookSecret=$PARAM_GH_WEBHOOK_SECRET" \
-            "LinearClientId=$PARAM_LINEAR_CLIENT_ID" \
-            "LinearClientSecret=$PARAM_LINEAR_CLIENT_SECRET" \
-            "LinearRedirectUri=$PARAM_LINEAR_REDIRECT_URI" \
-            "AnthropicApiKey=$PARAM_ANTHROPIC_API_KEY" \
-            "FrontendUrl=$PARAM_FRONTEND_URL"
+            --parameter-overrides $OVERRIDES

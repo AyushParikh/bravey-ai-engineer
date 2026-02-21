@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import get_current_user_with_org, get_db
@@ -35,7 +36,8 @@ async def linear_connect(
             detail="Admin access required",
         )
 
-    state = str(uuid.uuid4())
+    # Encode org_id in state so the callback can find the org without auth
+    state = f"{org.id}:{uuid.uuid4()}"
     params = {
         "client_id": settings.linear_client_id,
         "response_type": "code",
@@ -50,15 +52,27 @@ async def linear_connect(
 @router.get("/linear/callback")
 async def linear_callback(
     code: str,
-    state: str | None = None,
-    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    state: str = "",
     db: AsyncSession = Depends(get_db),
 ):
-    user, org = user_org
-    if user.role != "admin":
+    # Extract org_id from state
+    try:
+        org_id_str = state.split(":")[0]
+        org_id = uuid.UUID(org_id_str)
+    except (ValueError, IndexError):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid state parameter",
+        )
+
+    result = await db.execute(
+        select(Organization).where(Organization.id == org_id)
+    )
+    org = result.scalar_one_or_none()
+    if org is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
         )
 
     # Exchange code for token
@@ -110,16 +124,13 @@ async def linear_callback(
     webhook_secret = secrets.token_hex(32)
     try:
         webhook_url = f"{settings.frontend_url.rstrip('/')}/webhooks/linear"
-        # If we have an API URL different from frontend, use it
-        # For now, derive from the backend
         result = linear_service.graphql_request(
             access_token,
             """
-            mutation CreateWebhook($url: String!, $secret: String!, $teamId: String) {
+            mutation CreateWebhook($url: String!, $secret: String!) {
                 webhookCreate(input: {
                     url: $url
                     secret: $secret
-                    teamId: $teamId
                     resourceTypes: ["Issue"]
                     enabled: true
                 }) {
@@ -136,7 +147,6 @@ async def linear_callback(
             org.linear_webhook_secret = webhook_secret
     except Exception:
         logger.exception("Failed to create Linear webhook")
-        # Non-fatal — credentials still stored
 
     await db.commit()
     return {"status": "connected", "linear_org_id": org.linear_org_id}

@@ -104,6 +104,22 @@ def _execute_pipeline(db, run_id: str) -> None:
 
         issue_context = _build_issue_context(issue)
 
+        # Step 3b: Post "picked up" comment on Linear issue
+        if org.linear_access_token:
+            try:
+                _log(db, run.id, LogLevel.info, "Posting picked-up comment on Linear")
+                picked_up_body = (
+                    f"**Bravey has picked up this ticket** and is working on it.\n\n"
+                    f"A pull request will be opened shortly."
+                )
+                create_comment(
+                    org.linear_access_token,
+                    run.linear_issue_id,
+                    picked_up_body,
+                )
+            except Exception:
+                logger.exception("Failed to post picked-up comment on Linear")
+
         # Step 4: Post Slack "started" message
         if org.slack_bot_token and slack_channel:
             _log(db, run.id, LogLevel.info, "Posting Slack started message")

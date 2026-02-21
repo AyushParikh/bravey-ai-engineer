@@ -123,6 +123,21 @@ async def linear_callback(
     webhook_secret = secrets.token_hex(32)
     try:
         webhook_url = f"{settings.frontend_url.rstrip('/')}/webhooks/linear"
+
+        # Delete any existing webhook for this URL first
+        existing = linear_service.graphql_request(
+            access_token,
+            "query { webhooks { nodes { id url } } }",
+        )
+        for wh in ((existing.get("data") or {}).get("webhooks") or {}).get("nodes") or []:
+            if wh.get("url") == webhook_url:
+                linear_service.graphql_request(
+                    access_token,
+                    "mutation($id: String!) { webhookDelete(id: $id) { success } }",
+                    {"id": wh["id"]},
+                )
+                logger.info(f"Deleted existing Linear webhook {wh['id']}")
+
         wh_result = linear_service.graphql_request(
             access_token,
             """

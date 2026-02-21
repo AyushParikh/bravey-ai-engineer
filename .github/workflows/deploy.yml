@@ -25,7 +25,7 @@ jobs:
 
       - run: sam build
 
-      - name: Deploy to AWS
+      - name: Generate Parameters and Deploy
         env:
           PARAM_DB_URL: ${{ secrets.DATABASE_URL }}
           PARAM_ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
@@ -41,9 +41,9 @@ jobs:
           PARAM_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PARAM_FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
         run: |
+          # 1. Generate the JSON parameters
           python3 << 'PYEOF'
           import json, os
-
           mapping = {
               "DatabaseUrl": "PARAM_DB_URL",
               "EncryptionKey": "PARAM_ENCRYPTION_KEY",
@@ -59,23 +59,28 @@ jobs:
               "AnthropicApiKey": "PARAM_ANTHROPIC_API_KEY",
               "FrontendUrl": "PARAM_FRONTEND_URL",
           }
-
           params = []
           for param_key, env_var in mapping.items():
               value = os.environ.get(env_var, "")
               if value:
                   params.append({"ParameterKey": param_key, "ParameterValue": value})
-
           with open("sam-params.json", "w") as f:
               json.dump(params, f)
           PYEOF
 
-          # SAM doesn't support JSON param files, but aws cloudformation does.
-          # Use cloudformation deploy directly with the built SAM template.
+          # 2. Extract Stack Name safely (Fixes the ValidationError)
           STACK_NAME=$(grep '^stack_name =' samconfig.toml | cut -d'"' -f2 || echo "bravey-engineer-backend")
-          aws cloudformation deploy \
+
+          # 3. Convert JSON to SAM's space-separated string format
+          # This converts [{"ParameterKey": "K", "ParameterValue": "V"}] -> K=V
+          SAM_PARAMS=$(jq -r '.[] | "\(.ParameterKey)=\"\(.ParameterValue)\""' sam-params.json | tr '\n' ' ')
+
+          # 4. Deploy using SAM (Fixes the S3 CodeUri error)
+          sam deploy \
             --template-file .aws-sam/build/template.yaml \
             --stack-name "$STACK_NAME" \
-            --parameter-overrides "file://sam-params.json" \
+            --parameter-overrides $SAM_PARAMS \
             --capabilities CAPABILITY_IAM \
-            --no-fail-on-empty-changeset
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --resolve-s3

@@ -104,8 +104,9 @@ def _execute_pipeline(db, run_id: str) -> None:
 
         issue_context = _build_issue_context(issue)
 
-        # Step 3b: Post "picked up" comment on Linear issue
-        if org.linear_access_token:
+        # Step 3b: Post "picked up" comment on Linear issue (as bot)
+        comment_token = org.linear_bot_token or org.linear_access_token
+        if comment_token:
             try:
                 _log(db, run.id, LogLevel.info, "Posting picked-up comment on Linear")
                 picked_up_body = (
@@ -113,7 +114,7 @@ def _execute_pipeline(db, run_id: str) -> None:
                     f"A pull request will be opened shortly."
                 )
                 create_comment(
-                    org.linear_access_token,
+                    comment_token,
                     run.linear_issue_id,
                     picked_up_body,
                 )
@@ -240,7 +241,7 @@ def _execute_pipeline(db, run_id: str) -> None:
                     f"Changes made:\n{result.summary or 'See PR for details.'}"
                 )
                 create_comment(
-                    org.linear_access_token,
+                    comment_token,
                     run.linear_issue_id,
                     comment_body,
                 )

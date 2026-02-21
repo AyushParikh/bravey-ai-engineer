@@ -260,6 +260,7 @@ async def _handle_bot_callback(code: str, org_id_str: str, db: AsyncSession):
         raise HTTPException(status_code=400, detail="Could not determine bot user ID")
 
     org.linear_bravey_user_id = bot_user_id
+    org.linear_bot_token = bot_token
     await db.commit()
 
     return {
@@ -346,6 +347,7 @@ async def linear_disconnect(
     org.linear_webhook_id = None
     org.linear_webhook_secret = None
     org.linear_bravey_user_id = None
+    org.linear_bot_token = None
 
     await db.commit()
     return {"status": "disconnected"}

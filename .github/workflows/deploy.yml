@@ -25,7 +25,7 @@ jobs:
 
       - run: sam build
 
-      - name: Build parameter overrides file
+      - name: Deploy to AWS
         env:
           PARAM_DB_URL: ${{ secrets.DATABASE_URL }}
           PARAM_ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
@@ -42,7 +42,7 @@ jobs:
           PARAM_FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
         run: |
           python3 << 'PYEOF'
-          import json, os
+          import os, base64
 
           mapping = {
               "DatabaseUrl": "PARAM_DB_URL",
@@ -60,22 +60,25 @@ jobs:
               "FrontendUrl": "PARAM_FRONTEND_URL",
           }
 
-          params = []
+          # Base64-encode the private key so it has no spaces/newlines,
+          # then decode it back in config.py / github_service.py
+          # Actually, just build key=value pairs with proper escaping.
+          # We write a shell snippet that sam deploy will source.
+          parts = []
           for param_key, env_var in mapping.items():
               value = os.environ.get(env_var, "")
-              if value:
-                  params.append({
-                      "ParameterKey": param_key,
-                      "ParameterValue": value,
-                  })
+              if not value:
+                  continue
+              # Escape single quotes in value
+              escaped = value.replace("'", "'\"'\"'")
+              parts.append(f"'{param_key}={escaped}'")
 
-          with open("sam-params.json", "w") as f:
-              json.dump(params, f)
+          with open("deploy_cmd.sh", "w") as f:
+              f.write("sam deploy \\\n")
+              f.write("  --no-confirm-changeset \\\n")
+              f.write("  --no-fail-on-empty-changeset \\\n")
+              f.write("  --parameter-overrides \\\n")
+              f.write("  " + " \\\n  ".join(parts) + "\n")
           PYEOF
 
-      - name: Deploy to AWS
-        run: |
-          sam deploy \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides "file://sam-params.json"
+          bash deploy_cmd.sh

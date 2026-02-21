@@ -8,14 +8,23 @@ GITHUB_API_URL = "https://api.github.com"
 
 
 def generate_jwt(app_id: str, private_key: str) -> str:
+    import base64
+
     now = int(time.time())
     payload = {
         "iat": now - 60,
         "exp": now + (10 * 60),  # 10-minute expiry
         "iss": app_id,
     }
-    # Env vars may contain literal "\n" instead of real newlines
-    key = private_key.replace("\\n", "\n")
+    # Key may be base64-encoded (to avoid shell escaping issues with PEM)
+    key = private_key
+    if not key.startswith("-----"):
+        try:
+            key = base64.b64decode(key).decode("utf-8")
+        except Exception:
+            pass
+    # Also handle literal "\n" in env vars
+    key = key.replace("\\n", "\n")
     return jwt.encode(payload, key, algorithm="RS256")
 
 

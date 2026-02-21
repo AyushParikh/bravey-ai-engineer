@@ -33,7 +33,7 @@ jobs:
           PARAM_GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
           PARAM_GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
           PARAM_GH_APP_ID: ${{ secrets.GH_APP_ID }}
-          PARAM_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          PARAM_GH_APP_PRIVATE_KEY_B64: ${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
           PARAM_GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
           PARAM_LINEAR_CLIENT_ID: ${{ secrets.LINEAR_CLIENT_ID }}
           PARAM_LINEAR_CLIENT_SECRET: ${{ secrets.LINEAR_CLIENT_SECRET }}
@@ -42,7 +42,7 @@ jobs:
           PARAM_FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
         run: |
           python3 << 'PYEOF'
-          import os, base64
+          import json, os
 
           mapping = {
               "DatabaseUrl": "PARAM_DB_URL",
@@ -51,7 +51,7 @@ jobs:
               "GitHubOAuthClientId": "PARAM_GH_OAUTH_CLIENT_ID",
               "GitHubOAuthClientSecret": "PARAM_GH_OAUTH_CLIENT_SECRET",
               "GitHubAppId": "PARAM_GH_APP_ID",
-              "GitHubAppPrivateKey": "PARAM_GH_APP_PRIVATE_KEY",
+              "GitHubAppPrivateKey": "PARAM_GH_APP_PRIVATE_KEY_B64",
               "GitHubWebhookSecret": "PARAM_GH_WEBHOOK_SECRET",
               "LinearClientId": "PARAM_LINEAR_CLIENT_ID",
               "LinearClientSecret": "PARAM_LINEAR_CLIENT_SECRET",
@@ -60,25 +60,22 @@ jobs:
               "FrontendUrl": "PARAM_FRONTEND_URL",
           }
 
-          # Base64-encode the private key so it has no spaces/newlines,
-          # then decode it back in config.py / github_service.py
-          # Actually, just build key=value pairs with proper escaping.
-          # We write a shell snippet that sam deploy will source.
-          parts = []
+          params = []
           for param_key, env_var in mapping.items():
               value = os.environ.get(env_var, "")
-              if not value:
-                  continue
-              # Escape single quotes in value
-              escaped = value.replace("'", "'\"'\"'")
-              parts.append(f"'{param_key}={escaped}'")
+              if value:
+                  params.append({"ParameterKey": param_key, "ParameterValue": value})
 
-          with open("deploy_cmd.sh", "w") as f:
-              f.write("sam deploy \\\n")
-              f.write("  --no-confirm-changeset \\\n")
-              f.write("  --no-fail-on-empty-changeset \\\n")
-              f.write("  --parameter-overrides \\\n")
-              f.write("  " + " \\\n  ".join(parts) + "\n")
+          with open("sam-params.json", "w") as f:
+              json.dump(params, f)
           PYEOF
 
-          bash deploy_cmd.sh
+          # SAM doesn't support JSON param files, but aws cloudformation does.
+          # Use cloudformation deploy directly with the built SAM template.
+          STACK_NAME=$(grep -A1 'stack_name' samconfig.toml 2>/dev/null | grep '=' | cut -d'"' -f2 || echo "sam-app")
+          aws cloudformation deploy \
+            --template-file .aws-sam/build/template.yaml \
+            --stack-name "$STACK_NAME" \
+            --parameter-overrides "file://sam-params.json" \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset

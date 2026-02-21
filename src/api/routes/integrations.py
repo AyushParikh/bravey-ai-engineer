@@ -146,6 +146,7 @@ async def linear_callback(
                     url: $url
                     secret: $secret
                     resourceTypes: ["Issue"]
+                    allPublicTeams: true
                     enabled: true
                 }) {
                     success

@@ -138,6 +138,7 @@ def _execute_pipeline(db, run_id: str) -> None:
         if org.slack_bot_token and slack_channel:
             _log(db, run.id, LogLevel.info, "Posting Slack started message")
             try:
+                slack_service.join_channel(org.slack_bot_token, slack_channel)
                 slack_resp = slack_service.post_run_started(
                     bot_token=org.slack_bot_token,
                     channel_id=slack_channel,
@@ -271,12 +272,14 @@ def _execute_pipeline(db, run_id: str) -> None:
         if org.slack_bot_token:
             creator = issue.get("creator")
             creator_email = creator.get("email") if creator else None
+            _log(db, run.id, LogLevel.info, f"Issue creator: {creator}, email: {creator_email}")
             if creator_email:
                 try:
-                    _log(db, run.id, LogLevel.info, "Looking up issue creator in Slack")
+                    _log(db, run.id, LogLevel.info, f"Looking up Slack user for {creator_email}")
                     slack_user_id = slack_service.lookup_user_by_email(
                         org.slack_bot_token, creator_email
                     )
+                    _log(db, run.id, LogLevel.info, f"Slack user lookup result: {slack_user_id}")
                     if slack_user_id:
                         dm_text = (
                             f"Bravey opened a PR for your ticket "
@@ -305,12 +308,16 @@ def _execute_pipeline(db, run_id: str) -> None:
                                 ],
                             },
                         ]
-                        slack_service.send_dm(
+                        dm_resp = slack_service.send_dm(
                             org.slack_bot_token, slack_user_id, dm_text, dm_blocks
                         )
-                        _log(db, run.id, LogLevel.info, "Sent Slack DM to issue creator")
+                        _log(db, run.id, LogLevel.info, f"Slack DM response: {dm_resp}")
+                    else:
+                        _log(db, run.id, LogLevel.warn, f"No Slack user found for {creator_email}")
                 except Exception:
                     logger.exception("Failed to send Slack DM to issue creator")
+            else:
+                _log(db, run.id, LogLevel.warn, "No creator email on Linear issue, skipping DM")
 
         # Step 11: Update Slack message
         if org.slack_bot_token and slack_channel and slack_message_ts:

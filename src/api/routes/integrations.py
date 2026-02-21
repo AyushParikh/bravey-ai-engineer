@@ -40,7 +40,7 @@ async def slack_connect(
     state = f"{org.id}:{uuid.uuid4()}"
     params = {
         "client_id": settings.slack_client_id,
-        "scope": "chat:write,users:read,users:read.email",
+        "scope": "chat:write,channels:join,users:read,users:read.email",
         "redirect_uri": settings.slack_redirect_uri,
         "state": state,
     }

@@ -62,6 +62,20 @@ def send_dm(bot_token: str, user_id: str, text: str, blocks: list | None = None)
     return msg_resp.json()
 
 
+def join_channel(bot_token: str, channel_id: str) -> None:
+    """Join a public channel. Silently succeeds if already a member."""
+    resp = httpx.post(
+        f"{SLACK_API_URL}/conversations.join",
+        json={"channel": channel_id},
+        headers=_headers(bot_token),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok") and data.get("error") != "already_in_channel":
+        logger.warning("Failed to join channel %s: %s", channel_id, data.get("error"))
+
+
 def post_run_started(
     bot_token: str,
     channel_id: str,

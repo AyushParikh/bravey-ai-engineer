@@ -157,6 +157,8 @@ def _execute_pipeline(db, run_id: str) -> None:
                         )
                     )
                     db.commit()
+                else:
+                    logger.error("Slack post_run_started failed: %s", slack_resp.get("error"))
             except Exception:
                 logger.exception("Failed to post Slack message")
 

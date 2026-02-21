@@ -107,7 +107,7 @@ async def linear_callback(
             access_token,
             "query { organization { id name } }",
         )
-        linear_org = org_info.get("data", {}).get("organization", {})
+        linear_org = (org_info.get("data") or {}).get("organization") or {}
     except Exception:
         logger.exception("Failed to fetch Linear organization info")
         raise HTTPException(
@@ -140,7 +140,8 @@ async def linear_callback(
             """,
             {"url": webhook_url, "secret": webhook_secret},
         )
-        webhook_data = wh_result.get("data", {}).get("webhookCreate", {})
+        wh_data = wh_result.get("data") or {}
+        webhook_data = wh_data.get("webhookCreate") or {}
         if webhook_data.get("success"):
             org.linear_webhook_id = webhook_data["webhook"]["id"]
             org.linear_webhook_secret = webhook_secret

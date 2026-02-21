@@ -11,10 +11,17 @@ Globals:
         DATABASE_URL: !Ref DatabaseUrl
         ENCRYPTION_KEY: !Ref EncryptionKey
         SQS_QUEUE_URL: !Ref WorkerQueue
+        JWT_SECRET_KEY: !Ref JwtSecretKey
+        GITHUB_OAUTH_CLIENT_ID: !Ref GitHubOAuthClientId
+        GITHUB_OAUTH_CLIENT_SECRET: !Ref GitHubOAuthClientSecret
         GITHUB_APP_ID: !Ref GitHubAppId
         GITHUB_APP_PRIVATE_KEY: !Ref GitHubAppPrivateKey
         GITHUB_WEBHOOK_SECRET: !Ref GitHubWebhookSecret
+        LINEAR_CLIENT_ID: !Ref LinearClientId
+        LINEAR_CLIENT_SECRET: !Ref LinearClientSecret
+        LINEAR_REDIRECT_URI: !Ref LinearRedirectUri
         ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+        FRONTEND_URL: !Ref FrontendUrl
 
 Parameters:
   DatabaseUrl:
@@ -23,6 +30,17 @@ Parameters:
   EncryptionKey:
     Type: String
     NoEcho: true
+  JwtSecretKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+  GitHubOAuthClientId:
+    Type: String
+    Default: ""
+  GitHubOAuthClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
   GitHubAppId:
     Type: String
     Default: ""
@@ -34,10 +52,23 @@ Parameters:
     Type: String
     NoEcho: true
     Default: ""
+  LinearClientId:
+    Type: String
+    Default: ""
+  LinearClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+  LinearRedirectUri:
+    Type: String
+    Default: ""
   AnthropicApiKey:
     Type: String
     NoEcho: true
     Default: ""
+  FrontendUrl:
+    Type: String
+    Default: "http://localhost:3000"
 
 Resources:
   # --- SQS Queues ---

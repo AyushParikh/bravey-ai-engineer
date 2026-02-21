@@ -1,5 +1,6 @@
 from src.models.base import Base
 from src.models.organization import Organization
+from src.models.organization_invite import OrganizationInvite
 from src.models.user import User
 from src.models.repository import Repository
 from src.models.agent_run import AgentRun
@@ -10,6 +11,7 @@ from src.models.slack_notification import SlackNotification
 __all__ = [
     "Base",
     "Organization",
+    "OrganizationInvite",
     "User",
     "Repository",
     "AgentRun",

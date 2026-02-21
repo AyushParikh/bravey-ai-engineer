@@ -29,10 +29,17 @@ jobs:
         env:
           PARAM_DB_URL: ${{ secrets.DATABASE_URL }}
           PARAM_ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          PARAM_JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          PARAM_GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
+          PARAM_GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
           PARAM_GH_APP_ID: ${{ secrets.GH_APP_ID }}
           PARAM_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           PARAM_GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          PARAM_LINEAR_CLIENT_ID: ${{ secrets.LINEAR_CLIENT_ID }}
+          PARAM_LINEAR_CLIENT_SECRET: ${{ secrets.LINEAR_CLIENT_SECRET }}
+          PARAM_LINEAR_REDIRECT_URI: ${{ secrets.LINEAR_REDIRECT_URI }}
           PARAM_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PARAM_FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
         run: |
           sam deploy \
             --no-confirm-changeset \
@@ -40,7 +47,14 @@ jobs:
             --parameter-overrides \
             "DatabaseUrl=$PARAM_DB_URL" \
             "EncryptionKey=$PARAM_ENCRYPTION_KEY" \
+            "JwtSecretKey=$PARAM_JWT_SECRET_KEY" \
+            "GitHubOAuthClientId=$PARAM_GH_OAUTH_CLIENT_ID" \
+            "GitHubOAuthClientSecret=$PARAM_GH_OAUTH_CLIENT_SECRET" \
             "GitHubAppId=$PARAM_GH_APP_ID" \
             "GitHubAppPrivateKey=$PARAM_GH_APP_PRIVATE_KEY" \
             "GitHubWebhookSecret=$PARAM_GH_WEBHOOK_SECRET" \
-            "AnthropicApiKey=$PARAM_ANTHROPIC_API_KEY"
+            "LinearClientId=$PARAM_LINEAR_CLIENT_ID" \
+            "LinearClientSecret=$PARAM_LINEAR_CLIENT_SECRET" \
+            "LinearRedirectUri=$PARAM_LINEAR_REDIRECT_URI" \
+            "AnthropicApiKey=$PARAM_ANTHROPIC_API_KEY" \
+            "FrontendUrl=$PARAM_FRONTEND_URL"

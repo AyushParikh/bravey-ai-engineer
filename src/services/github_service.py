@@ -14,7 +14,9 @@ def generate_jwt(app_id: str, private_key: str) -> str:
         "exp": now + (10 * 60),  # 10-minute expiry
         "iss": app_id,
     }
-    return jwt.encode(payload, private_key, algorithm="RS256")
+    # Env vars may contain literal "\n" instead of real newlines
+    key = private_key.replace("\\n", "\n")
+    return jwt.encode(payload, key, algorithm="RS256")
 
 
 def get_installation_token(

@@ -82,22 +82,29 @@ async def linear_webhook(
     db.add(event)
     await db.flush()
 
-    # Check trigger condition: assignee just changed TO the Bravey bot user.
-    # We require updatedFrom to contain an assigneeId field (meaning the
-    # assignee actually changed), and the *previous* assignee must not have
-    # been the bot. This prevents re-triggering when the bot itself updates
-    # the issue state/comments (which also fires an "update" webhook but
-    # without an assigneeId in updatedFrom).
-    assignee_changed = (
-        payload.updatedFrom is not None
-        and "assigneeId" in (payload.updatedFrom.model_fields_set or set())
-    )
-    triggered = (
-        payload.action == "update"
-        and payload.data.assigneeId == org.linear_bravey_user_id
-        and assignee_changed
-        and payload.updatedFrom.assigneeId != org.linear_bravey_user_id
-    )
+    # Check trigger condition: assignee is the Bravey bot user.
+    # Two cases:
+    #   1. "create" — issue was created with Bravey already assigned
+    #   2. "update" — assignee just changed TO Bravey (updatedFrom must
+    #      contain assigneeId to confirm the assignee actually changed,
+    #      and the previous assignee must not have been the bot — this
+    #      prevents re-triggering when the bot updates state/comments)
+    assigned_to_bravey = payload.data.assigneeId == org.linear_bravey_user_id
+
+    if payload.action == "create":
+        triggered = assigned_to_bravey
+    elif payload.action == "update":
+        assignee_changed = (
+            payload.updatedFrom is not None
+            and "assigneeId" in (payload.updatedFrom.model_fields_set or set())
+        )
+        triggered = (
+            assigned_to_bravey
+            and assignee_changed
+            and payload.updatedFrom.assigneeId != org.linear_bravey_user_id
+        )
+    else:
+        triggered = False
 
     if not triggered:
         event.processed = True
@@ -178,7 +185,7 @@ async def linear_webhook(
     return Response(status_code=200, content="OK")
 
 
-@router.post("/github")
+@router.post("/github/app")
 async def github_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -248,5 +255,29 @@ async def github_webhook(
             f"PR #{pr_number} merged for run {run.id}, "
             f"Linear issue {run.linear_issue_identifier}"
         )
+
+    # Handle installation events — link installation_id to org
+    if x_github_event == "installation" and payload.get("action") == "created":
+        installation_id = payload.get("installation", {}).get("id")
+        sender_login = payload.get("sender", {}).get("login")
+        if installation_id and sender_login:
+            from src.models.user import User
+
+            # Find user by github_login, then update their org
+            user_result = await db.execute(
+                select(User).where(User.github_login == sender_login)
+            )
+            user = user_result.scalar_one_or_none()
+            if user and user.org_id:
+                org_result = await db.execute(
+                    select(Organization).where(Organization.id == user.org_id)
+                )
+                org = org_result.scalar_one_or_none()
+                if org:
+                    org.github_installation_id = installation_id
+                    await db.commit()
+                    logger.info(
+                        f"Linked GitHub installation {installation_id} to org {org.id}"
+                    )
 
     return Response(status_code=200, content="OK")

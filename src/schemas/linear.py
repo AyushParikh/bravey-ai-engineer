@@ -29,6 +29,7 @@ class LinearIssueData(BaseModel):
     teamId: str | None = None
     stateId: str | None = None
     assigneeId: str | None = None
+    delegateId: str | None = None
     creatorId: str | None = None
     labelIds: list[str] | None = None
     url: str | None = None
@@ -38,6 +39,7 @@ class LinearIssueData(BaseModel):
 
 class LinearUpdatedFrom(BaseModel):
     assigneeId: str | None = None
+    delegateId: str | None = None
     updatedAt: str | None = None
 
 

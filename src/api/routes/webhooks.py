@@ -82,26 +82,29 @@ async def linear_webhook(
     db.add(event)
     await db.flush()
 
-    # Check trigger condition: assignee is the Bravey bot user.
-    # Two cases:
-    #   1. "create" — issue was created with Bravey already assigned
-    #   2. "update" — assignee just changed TO Bravey (updatedFrom must
-    #      contain assigneeId to confirm the assignee actually changed,
-    #      and the previous assignee must not have been the bot — this
-    #      prevents re-triggering when the bot updates state/comments)
-    assigned_to_bravey = payload.data.assigneeId == org.linear_bravey_user_id
+    # Check trigger condition: Bravey bot was assigned or delegated.
+    # Supports both regular assignment (assigneeId) and agent delegation (delegateId).
+    bot_id = org.linear_bravey_user_id
+    assigned_to_bravey = payload.data.assigneeId == bot_id
+    delegated_to_bravey = payload.data.delegateId == bot_id
 
     if payload.action == "create":
-        triggered = assigned_to_bravey
+        triggered = assigned_to_bravey or delegated_to_bravey
     elif payload.action == "update":
+        updated_fields = payload.updatedFrom.model_fields_set if payload.updatedFrom else set()
+
         assignee_changed = (
-            payload.updatedFrom is not None
-            and "assigneeId" in (payload.updatedFrom.model_fields_set or set())
+            "assigneeId" in updated_fields
+            and payload.updatedFrom.assigneeId != bot_id
         )
+        delegate_changed = (
+            "delegateId" in updated_fields
+            and payload.updatedFrom.delegateId != bot_id
+        )
+
         triggered = (
-            assigned_to_bravey
-            and assignee_changed
-            and payload.updatedFrom.assigneeId != org.linear_bravey_user_id
+            (assigned_to_bravey and assignee_changed)
+            or (delegated_to_bravey and delegate_changed)
         )
     else:
         triggered = False

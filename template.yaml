@@ -22,6 +22,9 @@ Globals:
         LINEAR_REDIRECT_URI: !Ref LinearRedirectUri
         ANTHROPIC_API_KEY: !Ref AnthropicApiKey
         FRONTEND_URL: !Ref FrontendUrl
+        SLACK_CLIENT_ID: !Ref SlackClientId
+        SLACK_CLIENT_SECRET: !Ref SlackClientSecret
+        SLACK_REDIRECT_URI: !Ref SlackRedirectUri
 
 Parameters:
   DatabaseUrl:
@@ -65,6 +68,16 @@ Parameters:
   AnthropicApiKey:
     Type: String
     NoEcho: true
+    Default: ""
+  SlackClientId:
+    Type: String
+    Default: ""
+  SlackClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+  SlackRedirectUri:
+    Type: String
     Default: ""
   FrontendUrl:
     Type: String

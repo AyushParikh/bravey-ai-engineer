@@ -40,6 +40,9 @@ jobs:
           PARAM_LINEAR_REDIRECT_URI: ${{ secrets.LINEAR_REDIRECT_URI }}
           PARAM_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PARAM_FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
+          PARAM_SLACK_CLIENT_ID: ${{ secrets.SLACK_CLIENT_ID }}
+          PARAM_SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
+          PARAM_SLACK_REDIRECT_URI: ${{ secrets.SLACK_REDIRECT_URI }}
         run: |
           # 1. Generate the JSON parameters
           python3 << 'PYEOF'
@@ -58,6 +61,9 @@ jobs:
               "LinearRedirectUri": "PARAM_LINEAR_REDIRECT_URI",
               "AnthropicApiKey": "PARAM_ANTHROPIC_API_KEY",
               "FrontendUrl": "PARAM_FRONTEND_URL",
+              "SlackClientId": "PARAM_SLACK_CLIENT_ID",
+              "SlackClientSecret": "PARAM_SLACK_CLIENT_SECRET",
+              "SlackRedirectUri": "PARAM_SLACK_REDIRECT_URI",
           }
           params = []
           for param_key, env_var in mapping.items():

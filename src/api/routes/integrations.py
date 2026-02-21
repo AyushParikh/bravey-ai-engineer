@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,10 +105,9 @@ async def linear_callback(
     try:
         org_info = linear_service.graphql_request(
             access_token,
-            "query { organization { id name } viewer { id name email } }",
+            "query { organization { id name } }",
         )
         linear_org = org_info.get("data", {}).get("organization", {})
-        viewer = org_info.get("data", {}).get("viewer", {})
     except Exception:
         logger.exception("Failed to fetch Linear organization info")
         raise HTTPException(
@@ -115,16 +115,15 @@ async def linear_callback(
             detail="Failed to fetch Linear organization info",
         )
 
-    # Store credentials on org
+    # Store credentials on org (don't set bravey_user_id here — admin sets it separately)
     org.linear_access_token = access_token
     org.linear_org_id = linear_org.get("id")
-    org.linear_bravey_user_id = viewer.get("id")
 
-    # Create webhook for Linear
+    # Create webhook for Linear (requires admin-level token)
     webhook_secret = secrets.token_hex(32)
     try:
         webhook_url = f"{settings.frontend_url.rstrip('/')}/webhooks/linear"
-        result = linear_service.graphql_request(
+        wh_result = linear_service.graphql_request(
             access_token,
             """
             mutation CreateWebhook($url: String!, $secret: String!) {
@@ -141,15 +140,86 @@ async def linear_callback(
             """,
             {"url": webhook_url, "secret": webhook_secret},
         )
-        webhook_data = result.get("data", {}).get("webhookCreate", {})
+        webhook_data = wh_result.get("data", {}).get("webhookCreate", {})
         if webhook_data.get("success"):
             org.linear_webhook_id = webhook_data["webhook"]["id"]
             org.linear_webhook_secret = webhook_secret
+        else:
+            errors = wh_result.get("errors", [])
+            logger.error(f"Webhook creation failed: {errors}")
     except Exception:
         logger.exception("Failed to create Linear webhook")
 
     await db.commit()
-    return {"status": "connected", "linear_org_id": org.linear_org_id}
+
+    next_step = ""
+    if not org.linear_webhook_id:
+        next_step = "Webhook creation failed — authorize with a Linear workspace admin account."
+    elif not org.linear_bravey_user_id:
+        next_step = "Set the bot user: GET /integrations/linear/members then POST /integrations/linear/bot-user"
+
+    return {
+        "status": "connected",
+        "linear_org_id": org.linear_org_id,
+        "webhook_configured": org.linear_webhook_id is not None,
+        "next_step": next_step,
+    }
+
+
+@router.get("/linear/members")
+async def linear_members(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    """List all Linear workspace members so admin can identify the bot user."""
+    _, org = user_org
+    if not org.linear_access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Linear not connected",
+        )
+
+    result = linear_service.graphql_request(
+        org.linear_access_token,
+        """
+        query {
+            users {
+                nodes {
+                    id
+                    name
+                    displayName
+                    email
+                    active
+                    admin
+                }
+            }
+        }
+        """,
+    )
+    users = result.get("data", {}).get("users", {}).get("nodes", [])
+    return {"members": users}
+
+
+class BotUserRequest(BaseModel):
+    linear_user_id: str
+
+
+@router.post("/linear/bot-user")
+async def set_bot_user(
+    body: BotUserRequest,
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set which Linear user is the Bravey bot (issues assigned to this user trigger runs)."""
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+
+    org.linear_bravey_user_id = body.linear_user_id
+    await db.commit()
+    return {"status": "ok", "linear_bravey_user_id": org.linear_bravey_user_id}
 
 
 @router.get("/linear/status")
@@ -161,6 +231,7 @@ async def linear_status(
         "connected": org.linear_access_token is not None,
         "linear_org_id": org.linear_org_id,
         "webhook_configured": org.linear_webhook_id is not None,
+        "bot_user_configured": org.linear_bravey_user_id is not None,
     }
 
 

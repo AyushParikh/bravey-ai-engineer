@@ -30,6 +30,7 @@ LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 async def linear_connect(
     user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
 ):
+    """Step 1: Admin authorizes Linear (creates webhook, stores API token)."""
     user, org = user_org
     if user.role != "admin":
         raise HTTPException(
@@ -37,7 +38,6 @@ async def linear_connect(
             detail="Admin access required",
         )
 
-    # Encode org_id in state so the callback can find the org without auth
     state = f"{org.id}:{uuid.uuid4()}"
     params = {
         "client_id": settings.linear_client_id,
@@ -56,25 +56,30 @@ async def linear_callback(
     state: str = "",
     db: AsyncSession = Depends(get_db),
 ):
-    # Extract org_id from state
+    # Extract org_id and flow type from state
+    # State format: "org_id:nonce" (admin connect) or "bot:org_id:nonce" (bot install)
     try:
-        org_id_str = state.split(":")[0]
-        org_id = uuid.UUID(org_id_str)
+        parts = state.split(":")
+        if parts[0] == "bot":
+            return await _handle_bot_callback(code, parts[1], db)
+        else:
+            return await _handle_admin_callback(code, parts[0], db)
     except (ValueError, IndexError):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid state parameter",
         )
 
+
+async def _handle_admin_callback(code: str, org_id_str: str, db: AsyncSession):
+    """Handle the admin OAuth callback — store token and create webhook."""
+    org_id = uuid.UUID(org_id_str)
     result = await db.execute(
         select(Organization).where(Organization.id == org_id)
     )
     org = result.scalar_one_or_none()
     if org is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Organization not found",
-        )
+        raise HTTPException(status_code=404, detail="Organization not found")
 
     # Exchange code for token
     try:
@@ -94,10 +99,7 @@ async def linear_callback(
         token_data = resp.json()
     except Exception:
         logger.exception("Failed to exchange Linear OAuth code")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to exchange code for token",
-        )
+        raise HTTPException(status_code=400, detail="Failed to exchange code for token")
 
     access_token = token_data["access_token"]
 
@@ -110,16 +112,12 @@ async def linear_callback(
         linear_org = (org_info.get("data") or {}).get("organization") or {}
     except Exception:
         logger.exception("Failed to fetch Linear organization info")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to fetch Linear organization info",
-        )
+        raise HTTPException(status_code=400, detail="Failed to fetch Linear organization info")
 
-    # Store credentials on org (don't set bravey_user_id here — admin sets it separately)
     org.linear_access_token = access_token
     org.linear_org_id = linear_org.get("id")
 
-    # Create webhook for Linear (requires admin-level token)
+    # Create webhook (requires admin-level token)
     webhook_secret = secrets.token_hex(32)
     try:
         webhook_url = f"{settings.frontend_url.rstrip('/')}/webhooks/linear"
@@ -156,10 +154,9 @@ async def linear_callback(
             """,
             {"url": webhook_url, "secret": webhook_secret},
         )
-        wh_data = wh_result.get("data") or {}
-        webhook_data = wh_data.get("webhookCreate") or {}
-        if webhook_data.get("success"):
-            org.linear_webhook_id = webhook_data["webhook"]["id"]
+        wh_data = (wh_result.get("data") or {}).get("webhookCreate") or {}
+        if wh_data.get("success"):
+            org.linear_webhook_id = wh_data["webhook"]["id"]
             org.linear_webhook_secret = webhook_secret
         else:
             errors = wh_result.get("errors", [])
@@ -171,15 +168,117 @@ async def linear_callback(
 
     next_step = ""
     if not org.linear_webhook_id:
-        next_step = "Webhook creation failed — authorize with a Linear workspace admin account."
+        next_step = "Webhook creation failed — check logs."
     elif not org.linear_bravey_user_id:
-        next_step = "Set the bot user: GET /integrations/linear/members then POST /integrations/linear/bot-user"
+        next_step = "Install the bot: GET /integrations/linear/install-bot"
 
     return {
         "status": "connected",
         "linear_org_id": org.linear_org_id,
         "webhook_configured": org.linear_webhook_id is not None,
+        "bot_installed": org.linear_bravey_user_id is not None,
         "next_step": next_step,
+    }
+
+
+@router.get("/linear/install-bot")
+async def linear_install_bot(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    """Step 2: Install Bravey as a bot user in the workspace (actor=app)."""
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+
+    if not org.linear_access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Connect Linear first via /integrations/linear/connect",
+        )
+
+    state = f"bot:{org.id}:{uuid.uuid4()}"
+    params = {
+        "client_id": settings.linear_client_id,
+        "response_type": "code",
+        "scope": "read,write,issues:create,comments:create,app:assignable",
+        "actor": "app",
+        "state": state,
+        "redirect_uri": settings.linear_redirect_uri,
+        "prompt": "consent",
+    }
+    return {"authorization_url": f"{LINEAR_AUTHORIZE_URL}?{urlencode(params)}", "state": state}
+
+
+async def _handle_bot_callback(code: str, org_id_str: str, db: AsyncSession):
+    """Handle the bot install callback — store bot user ID."""
+    org_id = uuid.UUID(org_id_str)
+    result = await db.execute(
+        select(Organization).where(Organization.id == org_id)
+    )
+    org = result.scalar_one_or_none()
+    if org is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Exchange code for bot token
+    try:
+        resp = httpx.post(
+            LINEAR_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": settings.linear_client_id,
+                "client_secret": settings.linear_client_secret,
+                "redirect_uri": settings.linear_redirect_uri,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        token_data = resp.json()
+    except Exception:
+        logger.exception("Failed to exchange Linear bot OAuth code")
+        raise HTTPException(status_code=400, detail="Failed to exchange code for token")
+
+    bot_token = token_data["access_token"]
+
+    # Get the bot's user ID (viewer query returns the app's identity)
+    try:
+        viewer_info = linear_service.graphql_request(
+            bot_token,
+            "query { viewer { id name displayName } }",
+        )
+        viewer = (viewer_info.get("data") or {}).get("viewer") or {}
+        bot_user_id = viewer.get("id")
+    except Exception:
+        logger.exception("Failed to fetch bot user info")
+        raise HTTPException(status_code=400, detail="Failed to fetch bot user info")
+
+    if not bot_user_id:
+        raise HTTPException(status_code=400, detail="Could not determine bot user ID")
+
+    org.linear_bravey_user_id = bot_user_id
+    await db.commit()
+
+    return {
+        "status": "bot_installed",
+        "bot_user_id": bot_user_id,
+        "bot_name": viewer.get("displayName") or viewer.get("name"),
+    }
+
+
+@router.get("/linear/status")
+async def linear_status(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    _, org = user_org
+    return {
+        "connected": org.linear_access_token is not None,
+        "linear_org_id": org.linear_org_id,
+        "webhook_configured": org.linear_webhook_id is not None,
+        "bot_user_configured": org.linear_bravey_user_id is not None,
     }
 
 
@@ -187,13 +286,10 @@ async def linear_callback(
 async def linear_members(
     user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
 ):
-    """List all Linear workspace members so admin can identify the bot user."""
+    """List all Linear workspace members."""
     _, org = user_org
     if not org.linear_access_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Linear not connected",
-        )
+        raise HTTPException(status_code=400, detail="Linear not connected")
 
     result = linear_service.graphql_request(
         org.linear_access_token,
@@ -212,7 +308,7 @@ async def linear_members(
         }
         """,
     )
-    users = result.get("data", {}).get("users", {}).get("nodes", [])
+    users = ((result.get("data") or {}).get("users") or {}).get("nodes") or []
     return {"members": users}
 
 
@@ -226,30 +322,14 @@ async def set_bot_user(
     user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
     db: AsyncSession = Depends(get_db),
 ):
-    """Set which Linear user is the Bravey bot (issues assigned to this user trigger runs)."""
+    """Manually set the bot user ID (alternative to install-bot flow)."""
     user, org = user_org
     if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     org.linear_bravey_user_id = body.linear_user_id
     await db.commit()
     return {"status": "ok", "linear_bravey_user_id": org.linear_bravey_user_id}
-
-
-@router.get("/linear/status")
-async def linear_status(
-    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
-):
-    _, org = user_org
-    return {
-        "connected": org.linear_access_token is not None,
-        "linear_org_id": org.linear_org_id,
-        "webhook_configured": org.linear_webhook_id is not None,
-        "bot_user_configured": org.linear_bravey_user_id is not None,
-    }
 
 
 @router.post("/linear/disconnect")
@@ -259,10 +339,7 @@ async def linear_disconnect(
 ):
     user, org = user_org
     if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     org.linear_access_token = None
     org.linear_org_id = None
@@ -283,10 +360,7 @@ async def github_install_url(
 ):
     user, _ = user_org
     if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     install_url = f"https://github.com/apps/{settings.github_app_id}/installations/new"
     return {"install_url": install_url}
@@ -300,10 +374,7 @@ async def claim_github_installation(
 ):
     user, org = user_org
     if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     org.github_installation_id = installation_id
     await db.commit()

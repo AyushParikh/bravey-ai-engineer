@@ -42,7 +42,7 @@ async def linear_connect(
     params = {
         "client_id": settings.linear_client_id,
         "response_type": "code",
-        "scope": "read,write,issues:create,comments:create",
+        "scope": "read,write,issues:create,comments:create,admin",
         "state": state,
         "redirect_uri": settings.linear_redirect_uri,
         "prompt": "consent",

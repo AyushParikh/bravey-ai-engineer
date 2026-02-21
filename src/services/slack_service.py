@@ -1,4 +1,8 @@
+import logging
+
 import httpx
+
+logger = logging.getLogger(__name__)
 
 SLACK_API_URL = "https://slack.com/api"
 
@@ -8,6 +12,54 @@ def _headers(bot_token: str) -> dict:
         "Authorization": f"Bearer {bot_token}",
         "Content-Type": "application/json",
     }
+
+
+def lookup_user_by_email(bot_token: str, email: str) -> str | None:
+    """Look up a Slack user ID by email. Returns None if not found."""
+    resp = httpx.get(
+        f"{SLACK_API_URL}/users.lookupByEmail",
+        params={"email": email},
+        headers={"Authorization": f"Bearer {bot_token}"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("ok"):
+        return data["user"]["id"]
+    logger.warning("Slack user lookup failed for %s: %s", email, data.get("error"))
+    return None
+
+
+def send_dm(bot_token: str, user_id: str, text: str, blocks: list | None = None) -> dict | None:
+    """Open a DM channel with a user and send a message."""
+    # Open (or retrieve) the DM channel
+    open_resp = httpx.post(
+        f"{SLACK_API_URL}/conversations.open",
+        json={"users": user_id},
+        headers=_headers(bot_token),
+        timeout=10,
+    )
+    open_resp.raise_for_status()
+    open_data = open_resp.json()
+    if not open_data.get("ok"):
+        logger.warning("Failed to open DM channel with %s: %s", user_id, open_data.get("error"))
+        return None
+
+    channel_id = open_data["channel"]["id"]
+
+    # Send the message
+    msg_payload: dict = {"channel": channel_id, "text": text}
+    if blocks:
+        msg_payload["blocks"] = blocks
+
+    msg_resp = httpx.post(
+        f"{SLACK_API_URL}/chat.postMessage",
+        json=msg_payload,
+        headers=_headers(bot_token),
+        timeout=10,
+    )
+    msg_resp.raise_for_status()
+    return msg_resp.json()
 
 
 def post_run_started(

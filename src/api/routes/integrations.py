@@ -22,6 +22,133 @@ router = APIRouter(prefix="/integrations", tags=["integrations"])
 LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 
+SLACK_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
+SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+
+
+# --- Slack OAuth ---
+
+
+@router.get("/slack/connect")
+async def slack_connect(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    state = f"{org.id}:{uuid.uuid4()}"
+    params = {
+        "client_id": settings.slack_client_id,
+        "scope": "chat:write,users:read,users:read.email",
+        "redirect_uri": settings.slack_redirect_uri,
+        "state": state,
+    }
+    return {"authorization_url": f"{SLACK_AUTHORIZE_URL}?{urlencode(params)}", "state": state}
+
+
+@router.get("/slack/callback")
+async def slack_callback(
+    code: str,
+    state: str = "",
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        org_id_str = state.split(":")[0]
+        org_id = uuid.UUID(org_id_str)
+    except (ValueError, IndexError):
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    result = await db.execute(
+        select(Organization).where(Organization.id == org_id)
+    )
+    org = result.scalar_one_or_none()
+    if org is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    try:
+        resp = httpx.post(
+            SLACK_TOKEN_URL,
+            data={
+                "client_id": settings.slack_client_id,
+                "client_secret": settings.slack_client_secret,
+                "code": code,
+                "redirect_uri": settings.slack_redirect_uri,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        token_data = resp.json()
+    except Exception:
+        logger.exception("Failed to exchange Slack OAuth code")
+        raise HTTPException(status_code=400, detail="Failed to exchange code for token")
+
+    if not token_data.get("ok"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Slack OAuth error: {token_data.get('error', 'unknown')}",
+        )
+
+    org.slack_bot_token = token_data["access_token"]
+    org.slack_team_id = token_data.get("team", {}).get("id")
+    await db.commit()
+
+    return {
+        "status": "connected",
+        "slack_team_id": org.slack_team_id,
+    }
+
+
+@router.get("/slack/status")
+async def slack_status(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    _, org = user_org
+    return {
+        "connected": org.slack_bot_token is not None,
+        "slack_team_id": org.slack_team_id,
+        "default_channel_id": org.slack_default_channel_id,
+    }
+
+
+class SlackChannelRequest(BaseModel):
+    channel_id: str
+
+
+@router.post("/slack/channel")
+async def slack_set_channel(
+    body: SlackChannelRequest,
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
+):
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if not org.slack_bot_token:
+        raise HTTPException(status_code=400, detail="Connect Slack first")
+
+    org.slack_default_channel_id = body.channel_id
+    await db.commit()
+    return {"status": "ok", "default_channel_id": org.slack_default_channel_id}
+
+
+@router.post("/slack/disconnect")
+async def slack_disconnect(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
+):
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    org.slack_bot_token = None
+    org.slack_team_id = None
+    org.slack_default_channel_id = None
+    await db.commit()
+    return {"status": "disconnected"}
+
 
 # --- Linear OAuth ---
 

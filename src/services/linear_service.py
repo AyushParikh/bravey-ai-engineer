@@ -45,6 +45,7 @@ query GetIssue($id: String!) {
     priority
     priorityLabel
     url
+    creator { id name email }
     team { id name key }
     state { id name type }
     labels { nodes { id name color } }

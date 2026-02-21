@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     # Slack
     slack_client_id: str = ""
     slack_client_secret: str = ""
+    slack_redirect_uri: str = ""
 
     # Anthropic
     anthropic_api_key: str = ""

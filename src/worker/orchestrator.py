@@ -265,6 +265,51 @@ def _execute_pipeline(db, run_id: str) -> None:
             except Exception:
                 logger.exception("Failed to update Linear issue")
 
+        # Step 10b: DM the Linear issue creator via Slack
+        if org.slack_bot_token:
+            creator = issue.get("creator")
+            creator_email = creator.get("email") if creator else None
+            if creator_email:
+                try:
+                    _log(db, run.id, LogLevel.info, "Looking up issue creator in Slack")
+                    slack_user_id = slack_service.lookup_user_by_email(
+                        org.slack_bot_token, creator_email
+                    )
+                    if slack_user_id:
+                        dm_text = (
+                            f"Bravey opened a PR for your ticket "
+                            f"*{run.linear_issue_identifier}: {run.linear_issue_title}*"
+                        )
+                        dm_blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": (
+                                        f"*Bravey opened a PR for your ticket "
+                                        f"<{run.linear_issue_url}|{run.linear_issue_identifier}: "
+                                        f"{run.linear_issue_title}>*\n\n"
+                                        f"<{run.pr_url}|#{run.pr_number}: {pr_title}>"
+                                    ),
+                                },
+                            },
+                            {
+                                "type": "context",
+                                "elements": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"Branch: `{branch_name}`",
+                                    }
+                                ],
+                            },
+                        ]
+                        slack_service.send_dm(
+                            org.slack_bot_token, slack_user_id, dm_text, dm_blocks
+                        )
+                        _log(db, run.id, LogLevel.info, "Sent Slack DM to issue creator")
+                except Exception:
+                    logger.exception("Failed to send Slack DM to issue creator")
+
         # Step 11: Update Slack message
         if org.slack_bot_token and slack_channel and slack_message_ts:
             _log(db, run.id, LogLevel.info, "Updating Slack message")

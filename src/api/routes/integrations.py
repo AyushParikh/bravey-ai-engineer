@@ -1,6 +1,7 @@
 import logging
 import secrets
 import uuid
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -43,8 +44,7 @@ async def linear_connect(
         "redirect_uri": settings.linear_redirect_uri,
         "prompt": "consent",
     }
-    qs = "&".join(f"{k}={v}" for k, v in params.items())
-    return {"authorization_url": f"{LINEAR_AUTHORIZE_URL}?{qs}", "state": state}
+    return {"authorization_url": f"{LINEAR_AUTHORIZE_URL}?{urlencode(params)}", "state": state}
 
 
 @router.get("/linear/callback")

@@ -1,3 +1,5 @@
+from urllib.parse import urlencode
+
 import httpx
 
 from src.config import settings
@@ -13,8 +15,7 @@ def get_authorization_url(state: str) -> str:
         "scope": "read:user user:email",
         "state": state,
     }
-    qs = "&".join(f"{k}={v}" for k, v in params.items())
-    return f"{GITHUB_AUTHORIZE_URL}?{qs}"
+    return f"{GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
 
 
 def exchange_code_for_token(code: str) -> str:

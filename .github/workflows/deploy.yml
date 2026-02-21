@@ -72,7 +72,7 @@ jobs:
 
           # SAM doesn't support JSON param files, but aws cloudformation does.
           # Use cloudformation deploy directly with the built SAM template.
-          STACK_NAME=$(grep -A1 'stack_name' samconfig.toml 2>/dev/null | grep '=' | cut -d'"' -f2 || echo "sam-app")
+          STACK_NAME=$(grep '^stack_name =' samconfig.toml | cut -d'"' -f2 || echo "bravey-engineer-backend")
           aws cloudformation deploy \
             --template-file .aws-sam/build/template.yaml \
             --stack-name "$STACK_NAME" \

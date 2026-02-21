@@ -25,6 +25,7 @@ class Organization(Base, UUIDMixin, TimestampMixin):
     linear_access_token: Mapped[str | None] = mapped_column(EncryptedString())
     linear_bravey_user_id: Mapped[str | None] = mapped_column(String(100))
     linear_bot_token: Mapped[str | None] = mapped_column(EncryptedString())
+    linear_in_progress_state_id: Mapped[str | None] = mapped_column(String(100))
     linear_in_review_state_id: Mapped[str | None] = mapped_column(String(100))
     github_installation_id: Mapped[int | None] = mapped_column(BigInteger)
     github_app_private_key: Mapped[str | None] = mapped_column(EncryptedString())

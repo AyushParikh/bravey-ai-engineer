@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -121,6 +122,18 @@ def _execute_pipeline(db, run_id: str) -> None:
             except Exception:
                 logger.exception("Failed to post picked-up comment on Linear")
 
+        # Step 3c: Set Linear issue to "In Progress"
+        if org.linear_access_token and org.linear_in_progress_state_id:
+            try:
+                _log(db, run.id, LogLevel.info, "Setting Linear issue to In Progress")
+                update_issue_state(
+                    org.linear_access_token,
+                    run.linear_issue_id,
+                    org.linear_in_progress_state_id,
+                )
+            except Exception:
+                logger.exception("Failed to set Linear issue to In Progress")
+
         # Step 4: Post Slack "started" message
         if org.slack_bot_token and slack_channel:
             _log(db, run.id, LogLevel.info, "Posting Slack started message")
@@ -225,6 +238,10 @@ def _execute_pipeline(db, run_id: str) -> None:
             logger.warning("Failed to add label to PR")
 
         # Step 10: Update Linear issue
+        # Wait for Linear's GitHub integration to process the PR first,
+        # then override the status to "In Review"
+        _log(db, run.id, LogLevel.info, "Waiting for Linear-GitHub sync before setting In Review")
+        time.sleep(2)
         _log(db, run.id, LogLevel.info, "Updating Linear issue")
         if org.linear_access_token and org.linear_in_review_state_id:
             try:

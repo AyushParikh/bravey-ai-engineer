@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.dependencies import get_current_user_with_org, get_db
 from src.config import settings
 from src.models.organization import Organization
+from src.models.repository import Repository
 from src.models.user import User
-from src.services import linear_service
+from src.services import github_service, linear_service
 
 logger = logging.getLogger(__name__)
 
@@ -518,4 +519,86 @@ async def github_status(
     return {
         "connected": org.github_installation_id is not None,
         "installation_id": org.github_installation_id,
+    }
+
+
+@router.get("/github/repos")
+async def list_github_repos(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    """List repositories accessible to the GitHub App installation."""
+    _, org = user_org
+    if not org.github_installation_id:
+        raise HTTPException(status_code=400, detail="GitHub App not installed")
+
+    token = github_service.get_installation_token(
+        settings.github_app_id,
+        settings.github_app_private_key,
+        org.github_installation_id,
+    )
+    resp = httpx.get(
+        "https://api.github.com/installation/repositories",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        params={"per_page": 100},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    repos = resp.json().get("repositories", [])
+    return {
+        "repositories": [
+            {
+                "id": r["id"],
+                "full_name": r["full_name"],
+                "default_branch": r.get("default_branch", "main"),
+            }
+            for r in repos
+        ]
+    }
+
+
+class AddRepoRequest(BaseModel):
+    github_repo_id: int
+    full_name: str
+    default_branch: str = "main"
+
+
+@router.post("/github/repos")
+async def add_github_repo(
+    body: AddRepoRequest,
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
+):
+    """Register a repository for this organization."""
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    # Check if already registered
+    existing = await db.execute(
+        select(Repository).where(Repository.github_repo_id == body.github_repo_id)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Repository already registered")
+
+    parts = body.full_name.split("/", 1)
+    repo = Repository(
+        org_id=org.id,
+        github_repo_id=body.github_repo_id,
+        github_owner=parts[0],
+        github_repo_name=parts[1] if len(parts) > 1 else parts[0],
+        full_name=body.full_name,
+        default_branch=body.default_branch,
+    )
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    return {
+        "status": "added",
+        "id": str(repo.id),
+        "full_name": repo.full_name,
     }

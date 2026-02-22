@@ -25,6 +25,9 @@ Globals:
         SLACK_CLIENT_ID: !Ref SlackClientId
         SLACK_CLIENT_SECRET: !Ref SlackClientSecret
         SLACK_REDIRECT_URI: !Ref SlackRedirectUri
+        STRIPE_SECRET_KEY: !Ref StripeSecretKey
+        STRIPE_WEBHOOK_SECRET: !Ref StripeWebhookSecret
+        STRIPE_PUBLISHABLE_KEY: !Ref StripePublishableKey
 
 Parameters:
   DatabaseUrl:
@@ -77,6 +80,17 @@ Parameters:
     NoEcho: true
     Default: ""
   SlackRedirectUri:
+    Type: String
+    Default: ""
+  StripeSecretKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+  StripeWebhookSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+  StripePublishableKey:
     Type: String
     Default: ""
   FrontendUrl:

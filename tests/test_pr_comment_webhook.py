@@ -60,10 +60,13 @@ class TestIgnoresNonPrIssueComments:
 
 
 class TestCreatesRunForReviewComment:
+    @patch("src.api.routes.webhooks.billing_service")
     @patch("src.api.routes.webhooks.sqs_service")
     async def test_creates_agent_run(
-        self, mock_sqs, github_review_comment_payload
+        self, mock_sqs, mock_billing, github_review_comment_payload
     ):
+        mock_billing.check_usage_limit = AsyncMock(return_value=(True, ""))
+        mock_billing.increment_usage = AsyncMock(return_value=1)
         parent = _make_parent_run(pr_number=42)
         db = _mock_db(parent_run=parent)
 
@@ -93,10 +96,13 @@ class TestCreatesRunForReviewComment:
 
 
 class TestCreatesRunForIssueComment:
+    @patch("src.api.routes.webhooks.billing_service")
     @patch("src.api.routes.webhooks.sqs_service")
     async def test_creates_agent_run(
-        self, mock_sqs, github_issue_comment_payload
+        self, mock_sqs, mock_billing, github_issue_comment_payload
     ):
+        mock_billing.check_usage_limit = AsyncMock(return_value=(True, ""))
+        mock_billing.increment_usage = AsyncMock(return_value=1)
         parent = _make_parent_run(pr_number=42)
         db = _mock_db(parent_run=parent)
 

@@ -10,6 +10,7 @@ from src.models.base import Base, TimestampMixin, UUIDMixin
 if TYPE_CHECKING:
     from src.models.agent_run import AgentRun
     from src.models.repository import Repository
+    from src.models.subscription import Subscription
     from src.models.user import User
     from src.models.webhook_event import WebhookEvent
 
@@ -32,9 +33,13 @@ class Organization(Base, UUIDMixin, TimestampMixin):
     slack_team_id: Mapped[str | None] = mapped_column(String(100))
     slack_bot_token: Mapped[str | None] = mapped_column(EncryptedString())
     slack_default_channel_id: Mapped[str | None] = mapped_column(String(100))
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(100))
 
     # Relationships
     users: Mapped[list["User"]] = relationship(back_populates="organization")
     repositories: Mapped[list["Repository"]] = relationship(back_populates="organization")
     webhook_events: Mapped[list["WebhookEvent"]] = relationship(back_populates="organization")
     agent_runs: Mapped[list["AgentRun"]] = relationship(back_populates="organization")
+    subscription: Mapped["Subscription | None"] = relationship(
+        back_populates="organization", uselist=False
+    )

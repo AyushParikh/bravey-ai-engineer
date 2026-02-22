@@ -51,6 +51,9 @@ jobs:
           PARAM_SLACK_CLIENT_ID: ${{ secrets.SLACK_CLIENT_ID }}
           PARAM_SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
           PARAM_SLACK_REDIRECT_URI: ${{ secrets.SLACK_REDIRECT_URI }}
+          PARAM_STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          PARAM_STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          PARAM_STRIPE_PUBLISHABLE_KEY: ${{ secrets.STRIPE_PUBLISHABLE_KEY }}
         run: |
           # 1. Generate the JSON parameters
           python3 << 'PYEOF'
@@ -72,6 +75,9 @@ jobs:
               "SlackClientId": "PARAM_SLACK_CLIENT_ID",
               "SlackClientSecret": "PARAM_SLACK_CLIENT_SECRET",
               "SlackRedirectUri": "PARAM_SLACK_REDIRECT_URI",
+              "StripeSecretKey": "PARAM_STRIPE_SECRET_KEY",
+              "StripeWebhookSecret": "PARAM_STRIPE_WEBHOOK_SECRET",
+              "StripePublishableKey": "PARAM_STRIPE_PUBLISHABLE_KEY",
           }
           params = []
           for param_key, env_var in mapping.items():

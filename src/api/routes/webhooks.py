@@ -14,7 +14,7 @@ from src.models.organization import Organization
 from src.models.repository import Repository
 from src.models.webhook_event import WebhookEvent
 from src.schemas.linear import LinearWebhookPayload
-from src.services import linear_service, sqs_service
+from src.services import billing_service, linear_service, sqs_service
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,14 @@ async def _handle_pr_comment(
     db.add(event)
     await db.flush()
 
+    # Check usage limit before creating a run
+    allowed, reason = await billing_service.check_usage_limit(db, parent_run.org_id)
+    if not allowed:
+        event.processed = True
+        await db.commit()
+        logger.warning("PR comment run skipped for org %s: %s", parent_run.org_id, reason)
+        return
+
     # Create a follow-up AgentRun
     run = AgentRun(
         org_id=parent_run.org_id,
@@ -108,6 +116,9 @@ async def _handle_pr_comment(
     event.run_id = run.id
     event.processed = True
     await db.commit()
+
+    # Increment usage after successful run creation
+    await billing_service.increment_usage(db, parent_run.org_id)
 
     # Enqueue to SQS
     try:
@@ -212,6 +223,13 @@ async def linear_webhook(
         await db.commit()
         return Response(status_code=200, content="OK - not triggered")
 
+    # Check usage limit before creating a run
+    allowed, reason = await billing_service.check_usage_limit(db, org.id)
+    if not allowed:
+        event.processed = True
+        await db.commit()
+        return Response(status_code=200, content="OK - usage limit reached")
+
     # Check for existing active run for this issue (prevent duplicates)
     # Use advisory lock based on hash of issue ID to prevent race conditions
     from sqlalchemy import text
@@ -276,6 +294,9 @@ async def linear_webhook(
     event.run_id = run.id
     event.processed = True
     await db.commit()
+
+    # Increment usage after successful run creation
+    await billing_service.increment_usage(db, org.id)
 
     # Enqueue to SQS
     try:

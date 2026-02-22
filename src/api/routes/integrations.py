@@ -113,6 +113,39 @@ async def slack_status(
     }
 
 
+@router.get("/slack/channels")
+async def slack_list_channels(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    """List Slack channels visible to the bot."""
+    _, org = user_org
+    if not org.slack_bot_token:
+        raise HTTPException(status_code=400, detail="Connect Slack first")
+
+    channels = []
+    cursor = None
+    while True:
+        params = {"types": "public_channel", "limit": 200, "exclude_archived": "true"}
+        if cursor:
+            params["cursor"] = cursor
+        resp = httpx.get(
+            "https://slack.com/api/conversations.list",
+            headers={"Authorization": f"Bearer {org.slack_bot_token}"},
+            params=params,
+            timeout=15,
+        )
+        data = resp.json()
+        if not data.get("ok"):
+            raise HTTPException(status_code=400, detail=f"Slack API error: {data.get('error')}")
+        for ch in data.get("channels", []):
+            channels.append({"id": ch["id"], "name": ch["name"]})
+        cursor = data.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+
+    return {"channels": channels}
+
+
 class SlackChannelRequest(BaseModel):
     channel_id: str
 

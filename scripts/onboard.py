@@ -368,7 +368,32 @@ class OnboardCLI:
         )
         success("Slack connected!")
 
-        channel_id = prompt("Enter the Slack channel ID for notifications (e.g. C0123456789)")
+        info("Fetching Slack channels...")
+        resp = self.get("/integrations/slack/channels")
+        if resp.status_code != 200:
+            warn(f"Could not list channels: {resp.text}")
+            channel_id = prompt("Enter the Slack channel ID manually (e.g. C0123456789)")
+        else:
+            channels = resp.json()["channels"]
+            if not channels:
+                warn("No channels found.")
+                return
+
+            print(f"\n{BOLD}Available channels:{RESET}")
+            for i, ch in enumerate(channels, 1):
+                print(f"  {i}. #{ch['name']} ({ch['id']})")
+
+            print()
+            choice = prompt(f"Select a channel (1-{len(channels)})")
+            try:
+                idx = int(choice) - 1
+                if idx < 0 or idx >= len(channels):
+                    raise ValueError
+            except ValueError:
+                error("Invalid selection")
+                return
+            channel_id = channels[idx]["id"]
+
         if channel_id:
             resp = self.post(
                 "/integrations/slack/channel",

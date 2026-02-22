@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -66,7 +66,7 @@ class AgentRun(Base, UUIDMixin, TimestampMixin):
     trigger_type: Mapped[str] = mapped_column(
         String(50), default="linear_assignment", server_default="linear_assignment"
     )
-    trigger_comment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trigger_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     organization = relationship("Organization", back_populates="agent_runs")
     repository = relationship("Repository", back_populates="agent_runs")

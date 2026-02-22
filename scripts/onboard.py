@@ -224,28 +224,24 @@ class OnboardCLI:
         install_url = resp.json()["install_url"]
         info("Opening GitHub App installation page...")
         webbrowser.open(install_url)
+        info("Waiting for installation to be detected...")
 
-        print()
-        print(f"{DIM}After installing the app, GitHub will redirect you.")
-        print(f"Copy the installation_id from the URL query parameter.{RESET}")
-        print()
-        installation_id = prompt("Enter the installation_id")
+        def _check_auto_claim(_: dict) -> bool:
+            r = self.post("/integrations/github/auto-claim")
+            if r.status_code == 200:
+                data = r.json()
+                return data.get("status") in ("claimed", "already_claimed")
+            return False
 
-        try:
-            installation_id_int = int(installation_id)
-        except ValueError:
-            error("installation_id must be a number")
-            sys.exit(1)
-
-        resp = self.post(
-            "/integrations/github/claim",
-            params={"installation_id": installation_id_int},
+        self.poll_status(
+            "/integrations/github/status",
+            _check_auto_claim,
+            "Waiting for GitHub App installation",
         )
-        if resp.status_code != 200:
-            error(f"Failed to claim installation: {resp.text}")
-            sys.exit(1)
 
-        success(f"GitHub App installed (installation_id: {installation_id_int})")
+        resp = self.get("/integrations/github/status")
+        installation_id = resp.json().get("installation_id")
+        success(f"GitHub App installed (installation_id: {installation_id})")
 
     def step_add_repository(self) -> None:
         header("Step 4: Add Repository")

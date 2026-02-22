@@ -556,6 +556,43 @@ async def claim_github_installation(
     return {"status": "claimed", "installation_id": installation_id}
 
 
+@router.post("/github/auto-claim")
+async def auto_claim_github_installation(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
+):
+    """Look up the GitHub App installation for the current user and claim it."""
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if org.github_installation_id:
+        return {"status": "already_claimed", "installation_id": org.github_installation_id}
+
+    app_jwt = github_service.generate_jwt(settings.github_app_id, settings.github_app_private_key)
+    headers = {
+        "Authorization": f"Bearer {app_jwt}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    # Try to find installation for the user's GitHub account
+    resp = httpx.get(
+        f"https://api.github.com/users/{user.github_login}/installation",
+        headers=headers,
+        timeout=15,
+    )
+    if resp.status_code == 404:
+        return {"status": "not_found"}
+
+    resp.raise_for_status()
+    installation_id = resp.json()["id"]
+
+    org.github_installation_id = installation_id
+    await db.commit()
+    return {"status": "claimed", "installation_id": installation_id}
+
+
 @router.get("/github/status")
 async def github_status(
     user_org: tuple[User, Organization] = Depends(get_current_user_with_org),

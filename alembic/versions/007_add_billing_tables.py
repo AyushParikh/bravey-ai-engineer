@@ -35,12 +35,11 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
 
-    # Subscription status enum
+    # Subscription status enum (created automatically by create_table below)
     subscription_status = sa.Enum(
         "active", "past_due", "canceled", "trialing", "incomplete",
         name="subscription_status",
     )
-    subscription_status.create(op.get_bind(), checkfirst=True)
 
     # Subscriptions table
     op.create_table(

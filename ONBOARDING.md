@@ -1,5 +1,9 @@
 # Bravey API Onboarding Guide
 
+```
+python3 scripts/onboard.py --api-url https://d2eefuzpqj.execute-api.us-east-1.amazonaws.com
+```
+
 Technical step-by-step guide for integrating with the Bravey backend API. All endpoints are relative to the API base URL. Authenticated endpoints require a `Bearer` JWT token in the `Authorization` header.
 
 ```
@@ -17,7 +21,7 @@ Authorization: Bearer <jwt_token>
 
 ---
 
-Base URL FOR ALL ENDPOINTS: https://d2eefuzpqj.execute-api.us-east-1.amazonaws.com
+Base URL FOR ALL ENDPOINTS: [https://d2eefuzpqj.execute-api.us-east-1.amazonaws.com](https://d2eefuzpqj.execute-api.us-east-1.amazonaws.com)
 
 ## Step 1: Authenticate via GitHub OAuth
 
@@ -28,6 +32,7 @@ GET /auth/github/login
 ```
 
 **Response:**
+
 ```json
 {
   "authorization_url": "https://github.com/login/oauth/authorize?client_id=...&scope=read:user+user:email&state=...",
@@ -59,6 +64,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Response:**
+
 ```json
 {
   "id": "uuid",
@@ -81,6 +87,7 @@ Content-Type: application/json
 ```
 
 **Request body:**
+
 ```json
 {
   "name": "My Company",
@@ -89,6 +96,7 @@ Content-Type: application/json
 ```
 
 **Response (201):**
+
 ```json
 {
   "id": "uuid",
@@ -110,6 +118,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Request body:**
+
 ```json
 {
   "email": "teammate@example.com",
@@ -118,6 +127,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Response (201):**
+
 ```json
 {
   "id": "uuid",
@@ -131,6 +141,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 Invited users accept via:
+
 ```
 POST /organizations/invites/{token}/accept
 Authorization: Bearer <jwt_token>
@@ -150,6 +161,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Response:**
+
 ```json
 {
   "authorization_url": "https://linear.app/oauth/authorize?client_id=...&scope=read,write,issues:create,comments:create,admin&state=...",
@@ -168,6 +180,7 @@ GET /integrations/linear/callback?code=<code>&state=<org_id>:<nonce>
 ```
 
 This endpoint:
+
 1. Exchanges the OAuth code for a Linear access token.
 2. Fetches the Linear organization ID via GraphQL.
 3. Stores the access token (AES-256 encrypted at rest) and org ID.
@@ -176,6 +189,7 @@ This endpoint:
 6. Stores the webhook ID and webhook secret (used for HMAC-SHA256 signature verification).
 
 **Response:**
+
 ```json
 {
   "status": "connected",
@@ -194,6 +208,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Response:**
+
 ```json
 {
   "connected": true,
@@ -217,6 +232,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Response:**
+
 ```json
 {
   "authorization_url": "https://linear.app/oauth/authorize?client_id=...&actor=app&scope=read,write,issues:create,comments:create,app:assignable&state=bot:<org_id>:<nonce>",
@@ -239,6 +255,7 @@ GET /integrations/linear/callback?code=<code>&state=bot:<org_id>:<nonce>
 The callback detects the `bot:` prefix in state, exchanges the code for a bot token, queries `{ viewer { id name displayName } }` to get the bot's user ID, and stores it on the organization as `linear_bravey_user_id`.
 
 **Response:**
+
 ```json
 {
   "status": "bot_installed",
@@ -259,6 +276,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Response:**
+
 ```json
 {
   "members": [
@@ -291,6 +309,7 @@ Content-Type: application/json
 ```
 
 **Request body:**
+
 ```json
 {
   "linear_user_id": "bot-user-uuid"
@@ -298,6 +317,7 @@ Content-Type: application/json
 ```
 
 **Response:**
+
 ```json
 {
   "status": "ok",
@@ -319,6 +339,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Response:**
+
 ```json
 {
   "install_url": "https://github.com/apps/<app-name>/installations/new"
@@ -347,6 +368,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Response:**
+
 ```json
 {
   "status": "claimed",
@@ -362,6 +384,7 @@ Authorization: Bearer <jwt_token>
 ```
 
 **Response:**
+
 ```json
 {
   "connected": true,
@@ -417,13 +440,15 @@ Authorization: Bearer <jwt_token>
 
 Confirm:
 
-| Integration | Field | Expected |
-|---|---|---|
-| Linear | `connected` | `true` |
-| Linear | `webhook_configured` | `true` |
-| Linear | `bot_user_configured` | `true` |
-| GitHub | `connected` | `true` |
-| GitHub | `installation_id` | non-null integer |
+
+| Integration | Field                 | Expected         |
+| ----------- | --------------------- | ---------------- |
+| Linear      | `connected`           | `true`           |
+| Linear      | `webhook_configured`  | `true`           |
+| Linear      | `bot_user_configured` | `true`           |
+| GitHub      | `connected`           | `true`           |
+| GitHub      | `installation_id`     | non-null integer |
+
 
 ---
 
@@ -439,6 +464,7 @@ Authorization: Bearer <jwt_token>
 Clears: `linear_access_token`, `linear_org_id`, `linear_webhook_id`, `linear_webhook_secret`, `linear_bravey_user_id`.
 
 **Response:**
+
 ```json
 {
   "status": "disconnected"
@@ -456,18 +482,18 @@ Once onboarding is complete:
 3. Bravey verifies the HMAC-SHA256 signature and timestamp (must be within 60 seconds).
 4. Bravey creates an `AgentRun` record with status `queued` and enqueues it to SQS.
 5. The worker Lambda picks up the SQS message and runs the pipeline:
-   - Fetches full issue context (title, description, comments, labels, parent) from Linear.
-   - **Posts a comment on the Linear ticket: "Bravey has picked up this ticket".**
-   - Posts a "started" message to Slack (if connected).
-   - Generates a GitHub installation token (JWT → short-lived token).
-   - Creates a branch: `bravey/<issue-id>-<slugified-title>`.
-   - Runs the Claude AI agent which reads the codebase and implements the changes.
-   - Opens a pull request with the Claude summary and a link back to the Linear issue.
-   - Adds a `bravey-generated` label to the PR.
-   - Moves the Linear issue to the "In Review" state.
-   - Posts a comment on the Linear issue with the PR link, branch name, and changes summary.
-   - Updates the Slack message with PR details and duration.
-   - Marks the run as `success`.
+  - Fetches full issue context (title, description, comments, labels, parent) from Linear.
+  - **Posts a comment on the Linear ticket: "Bravey has picked up this ticket".**
+  - Posts a "started" message to Slack (if connected).
+  - Generates a GitHub installation token (JWT → short-lived token).
+  - Creates a branch: `bravey/<issue-id>-<slugified-title>`.
+  - Runs the Claude AI agent which reads the codebase and implements the changes.
+  - Opens a pull request with the Claude summary and a link back to the Linear issue.
+  - Adds a `bravey-generated` label to the PR.
+  - Moves the Linear issue to the "In Review" state.
+  - Posts a comment on the Linear issue with the PR link, branch name, and changes summary.
+  - Updates the Slack message with PR details and duration.
+  - Marks the run as `success`.
 
 ---
 
@@ -498,22 +524,25 @@ POST /webhooks/github/app
 
 The backend requires these environment variables to be configured:
 
-| Variable | Description |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string (async/asyncpg) |
-| `ENCRYPTION_KEY` | 32-byte hex-encoded AES-256 key for token encryption |
-| `JWT_SECRET_KEY` | Secret for signing JWT tokens |
-| `GITHUB_OAUTH_CLIENT_ID` | GitHub OAuth app client ID (user login) |
-| `GITHUB_OAUTH_CLIENT_SECRET` | GitHub OAuth app client secret |
-| `LINEAR_CLIENT_ID` | Linear OAuth app client ID |
-| `LINEAR_CLIENT_SECRET` | Linear OAuth app client secret |
-| `LINEAR_REDIRECT_URI` | Linear OAuth redirect URI (e.g. `https://api.bravey.co/integrations/linear/callback`) |
-| `GITHUB_APP_ID` | GitHub App ID |
-| `GITHUB_APP_PRIVATE_KEY` | GitHub App private key (PEM or base64-encoded) |
-| `GITHUB_WEBHOOK_SECRET` | GitHub App webhook secret |
-| `SLACK_CLIENT_ID` | Slack OAuth app client ID |
-| `SLACK_CLIENT_SECRET` | Slack OAuth app client secret |
-| `ANTHROPIC_API_KEY` | Anthropic API key for Claude |
-| `FRONTEND_URL` | Frontend URL for redirects (e.g. `https://app.bravey.co`) |
-| `SQS_QUEUE_URL` | AWS SQS queue URL for async job processing |
-| `AWS_REGION` | AWS region (default: `us-east-1`) |
+
+| Variable                     | Description                                                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------- |
+| `DATABASE_URL`               | PostgreSQL connection string (async/asyncpg)                                          |
+| `ENCRYPTION_KEY`             | 32-byte hex-encoded AES-256 key for token encryption                                  |
+| `JWT_SECRET_KEY`             | Secret for signing JWT tokens                                                         |
+| `GITHUB_OAUTH_CLIENT_ID`     | GitHub OAuth app client ID (user login)                                               |
+| `GITHUB_OAUTH_CLIENT_SECRET` | GitHub OAuth app client secret                                                        |
+| `LINEAR_CLIENT_ID`           | Linear OAuth app client ID                                                            |
+| `LINEAR_CLIENT_SECRET`       | Linear OAuth app client secret                                                        |
+| `LINEAR_REDIRECT_URI`        | Linear OAuth redirect URI (e.g. `https://api.bravey.co/integrations/linear/callback`) |
+| `GITHUB_APP_ID`              | GitHub App ID                                                                         |
+| `GITHUB_APP_PRIVATE_KEY`     | GitHub App private key (PEM or base64-encoded)                                        |
+| `GITHUB_WEBHOOK_SECRET`      | GitHub App webhook secret                                                             |
+| `SLACK_CLIENT_ID`            | Slack OAuth app client ID                                                             |
+| `SLACK_CLIENT_SECRET`        | Slack OAuth app client secret                                                         |
+| `ANTHROPIC_API_KEY`          | Anthropic API key for Claude                                                          |
+| `FRONTEND_URL`               | Frontend URL for redirects (e.g. `https://app.bravey.co`)                             |
+| `SQS_QUEUE_URL`              | AWS SQS queue URL for async job processing                                            |
+| `AWS_REGION`                 | AWS region (default: `us-east-1`)                                                     |
+
+

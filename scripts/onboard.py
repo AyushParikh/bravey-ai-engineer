@@ -305,43 +305,53 @@ class OnboardCLI:
             info("Skipping project tracker setup.")
             return
 
-        # Linear connect
-        info("Starting Linear OAuth...")
-        resp = self.get("/integrations/linear/connect")
-        if resp.status_code != 200:
-            error(f"Failed to start Linear OAuth: {resp.text}")
-            sys.exit(1)
+        # Check current Linear status
+        resp = self.get("/integrations/linear/status")
+        linear_status = resp.json() if resp.status_code == 200 else {}
 
-        auth_url = resp.json()["authorization_url"]
-        info("Opening Linear authorization in your browser...")
-        webbrowser.open(auth_url)
+        if not linear_status.get("connected"):
+            # Linear connect
+            info("Starting Linear OAuth...")
+            resp = self.get("/integrations/linear/connect")
+            if resp.status_code != 200:
+                error(f"Failed to start Linear OAuth: {resp.text}")
+                sys.exit(1)
 
-        data = self.poll_status(
-            "/integrations/linear/status",
-            lambda d: d.get("connected"),
-            "Waiting for Linear authorization",
-        )
-        success("Linear connected!")
+            auth_url = resp.json()["authorization_url"]
+            info("Opening Linear authorization in your browser...")
+            webbrowser.open(auth_url)
 
-        # Install bot
-        info("Now let's install the Bravey bot in Linear...")
-        resp = self.get("/integrations/linear/install-bot")
-        if resp.status_code != 200:
-            error(f"Failed to get bot install URL: {resp.text}")
-            return
+            self.poll_status(
+                "/integrations/linear/status",
+                lambda d: d.get("connected"),
+                "Waiting for Linear authorization",
+            )
+            success("Linear connected!")
+        else:
+            success("Linear already connected.")
 
-        auth_url = resp.json()["authorization_url"]
-        info("Opening Linear bot installation in your browser...")
-        webbrowser.open(auth_url)
+        if not linear_status.get("bot_user_configured"):
+            # Install bot
+            info("Now let's install the Bravey bot in Linear...")
+            resp = self.get("/integrations/linear/install-bot")
+            if resp.status_code != 200:
+                error(f"Failed to get bot install URL: {resp.text}")
+                return
 
-        data = self.poll_status(
-            "/integrations/linear/status",
-            lambda d: d.get("bot_user_configured"),
-            "Waiting for bot installation",
-        )
-        success("Linear bot installed!")
+            auth_url = resp.json()["authorization_url"]
+            info("Opening Linear bot installation in your browser...")
+            webbrowser.open(auth_url)
 
-        # Auto-configure workflow states
+            self.poll_status(
+                "/integrations/linear/status",
+                lambda d: d.get("bot_user_configured"),
+                "Waiting for bot installation",
+            )
+            success("Linear bot installed!")
+        else:
+            success("Linear bot already installed.")
+
+        # Always auto-configure workflow states
         info("Configuring Linear workflow states...")
         resp = self.post("/integrations/linear/configure-states")
         if resp.status_code == 200:

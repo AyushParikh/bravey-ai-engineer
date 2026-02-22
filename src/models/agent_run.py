@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, UUIDMixin
@@ -57,6 +58,15 @@ class AgentRun(Base, UUIDMixin, TimestampMixin):
     timeout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[str | None] = mapped_column(Text)
     claude_summary: Mapped[str | None] = mapped_column(Text)
+
+    # PR-comment follow-up fields
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("agent_runs.id"), nullable=True
+    )
+    trigger_type: Mapped[str] = mapped_column(
+        String(50), default="linear_assignment", server_default="linear_assignment"
+    )
+    trigger_comment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     organization = relationship("Organization", back_populates="agent_runs")
     repository = relationship("Repository", back_populates="agent_runs")

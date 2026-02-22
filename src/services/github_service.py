@@ -237,6 +237,74 @@ def create_stub_commit(
     return new_commit_sha
 
 
+def get_pr_diff(token: str, owner: str, repo: str, pr_number: int) -> str:
+    """Fetch the diff for a pull request."""
+    resp = httpx.get(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/pulls/{pr_number}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.diff",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.text
+
+
+def get_review_comment(
+    token: str, owner: str, repo: str, comment_id: int
+) -> dict:
+    """Fetch a single pull request review comment with file/line context."""
+    resp = httpx.get(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/pulls/comments/{comment_id}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def reply_to_review_comment(
+    token: str, owner: str, repo: str, pull_number: int, comment_id: int, body: str
+) -> dict:
+    """Reply to a pull request review comment."""
+    resp = httpx.post(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies",
+        json={"body": body},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def create_issue_comment(
+    token: str, owner: str, repo: str, issue_number: int, body: str
+) -> dict:
+    """Create a comment on an issue or pull request (general comment, not inline)."""
+    resp = httpx.post(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/issues/{issue_number}/comments",
+        json={"body": body},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def add_labels(
     token: str, owner: str, repo: str, issue_number: int, labels: list[str]
 ) -> dict:

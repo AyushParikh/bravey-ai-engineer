@@ -21,6 +21,104 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 
+async def _handle_pr_comment(
+    db: AsyncSession,
+    event_type: str,
+    delivery_id: str,
+    payload: dict,
+) -> None:
+    """Handle issue_comment or pull_request_review_comment on a Bravey PR."""
+    # Ignore comments from bots to prevent infinite loops
+    sender = payload.get("sender", {})
+    if sender.get("type") == "Bot":
+        logger.info("Ignoring PR comment from bot user %s", sender.get("login"))
+        return
+
+    # Determine PR number and repo
+    repo_full_name = payload.get("repository", {}).get("full_name", "")
+
+    if event_type == "pull_request_review_comment":
+        pr_number = payload.get("pull_request", {}).get("number")
+        comment = payload.get("comment", {})
+        comment_id = comment.get("id")
+    else:
+        # issue_comment — only handle if it's on a PR (has pull_request key)
+        issue = payload.get("issue", {})
+        if "pull_request" not in issue:
+            return
+        pr_number = issue.get("number")
+        comment = payload.get("comment", {})
+        comment_id = comment.get("id")
+
+    if not pr_number or not comment_id:
+        return
+
+    # Find the parent AgentRun that opened this PR
+    result = await db.execute(
+        select(AgentRun)
+        .join(Repository, AgentRun.repo_id == Repository.id)
+        .where(
+            AgentRun.pr_number == pr_number,
+            Repository.full_name == repo_full_name,
+            AgentRun.trigger_type == "linear_assignment",
+            AgentRun.status == RunStatus.success,
+        )
+        .order_by(AgentRun.created_at.desc())
+        .limit(1)
+    )
+    parent_run = result.scalar_one_or_none()
+    if not parent_run:
+        logger.info(
+            "No Bravey parent run found for PR #%s on %s", pr_number, repo_full_name
+        )
+        return
+
+    # Persist webhook event
+    event = WebhookEvent(
+        org_id=parent_run.org_id,
+        source="github",
+        event_type=f"{event_type}.created",
+        delivery_id=delivery_id,
+        payload=payload,
+        signature_ok=True,
+        processed=False,
+    )
+    db.add(event)
+    await db.flush()
+
+    # Create a follow-up AgentRun
+    run = AgentRun(
+        org_id=parent_run.org_id,
+        repo_id=parent_run.repo_id,
+        linear_issue_id=parent_run.linear_issue_id,
+        linear_issue_identifier=parent_run.linear_issue_identifier,
+        linear_issue_title=parent_run.linear_issue_title,
+        linear_issue_url=parent_run.linear_issue_url,
+        status=RunStatus.queued,
+        branch_name=parent_run.branch_name,
+        pr_number=parent_run.pr_number,
+        pr_url=parent_run.pr_url,
+        parent_run_id=parent_run.id,
+        trigger_type="pr_comment",
+        trigger_comment_id=comment_id,
+    )
+    db.add(run)
+    await db.flush()
+
+    event.run_id = run.id
+    event.processed = True
+    await db.commit()
+
+    # Enqueue to SQS
+    try:
+        sqs_service.send_run_message(str(run.id))
+        logger.info(
+            "Enqueued PR comment follow-up run %s for PR #%s", run.id, pr_number
+        )
+    except Exception:
+        logger.exception(f"Failed to enqueue PR comment run {run.id} to SQS")
+
+
 @router.post("/linear")
 async def linear_webhook(
     request: Request,
@@ -215,6 +313,11 @@ async def github_webhook(
         payload = json.loads(raw_body)
     except Exception:
         return Response(status_code=400, content="Invalid payload")
+
+    # Handle PR comment events — trigger Bravey follow-up runs
+    if x_github_event in ("issue_comment", "pull_request_review_comment") and payload.get("action") == "created":
+        await _handle_pr_comment(db, x_github_event, x_github_delivery, payload)
+        return Response(status_code=200, content="OK")
 
     # Handle pull_request.closed (merged) — update Linear to Done
     if x_github_event == "pull_request" and payload.get("action") == "closed":

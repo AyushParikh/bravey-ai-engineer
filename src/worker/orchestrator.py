@@ -62,6 +62,161 @@ def _build_issue_context(issue: dict) -> str:
     return "\n".join(parts)
 
 
+def _execute_comment_pipeline(db, run: AgentRun) -> None:
+    """Handle a PR review comment follow-up: make changes and reply on GitHub."""
+    now = datetime.now(timezone.utc)
+    run.status = RunStatus.running
+    run.started_at = now
+    run.timeout_at = now + timedelta(minutes=30)
+    db.commit()
+
+    _log(db, run.id, LogLevel.info, "PR comment pipeline started")
+
+    org = db.execute(
+        select(Organization).where(Organization.id == run.org_id)
+    ).scalar_one()
+    repo = db.execute(
+        select(Repository).where(Repository.id == run.repo_id)
+    ).scalar_one()
+
+    try:
+        # Load parent run for context
+        parent_run = db.execute(
+            select(AgentRun).where(AgentRun.id == run.parent_run_id)
+        ).scalar_one()
+
+        branch_name = parent_run.branch_name
+        pr_number = parent_run.pr_number
+
+        # Generate GitHub installation token
+        _log(db, run.id, LogLevel.info, "Generating GitHub installation token")
+        from src.config import settings
+
+        gh_token = github_service.get_installation_token(
+            app_id=settings.github_app_id,
+            private_key=settings.github_app_private_key,
+            installation_id=org.github_installation_id,
+        )
+
+        # Fetch PR diff for context
+        _log(db, run.id, LogLevel.info, "Fetching PR diff")
+        pr_diff = github_service.get_pr_diff(
+            gh_token, repo.github_owner, repo.github_repo_name, pr_number
+        )
+        # Truncate if too large
+        if len(pr_diff) > 50000:
+            pr_diff = pr_diff[:50000] + "\n... (truncated)"
+
+        # Fetch the triggering comment
+        _log(db, run.id, LogLevel.info, "Fetching triggering comment")
+        comment_body = ""
+        comment_file = None
+        comment_line = None
+        is_review_comment = False
+
+        try:
+            review_comment = github_service.get_review_comment(
+                gh_token, repo.github_owner, repo.github_repo_name,
+                run.trigger_comment_id,
+            )
+            comment_body = review_comment.get("body", "")
+            comment_file = review_comment.get("path")
+            comment_line = review_comment.get("original_line") or review_comment.get("line")
+            is_review_comment = True
+            _log(db, run.id, LogLevel.info, f"Review comment on {comment_file}:{comment_line}")
+        except Exception:
+            # Might be a general issue_comment — fetch from issues API
+            _log(db, run.id, LogLevel.info, "Not a review comment, treating as issue comment")
+            import httpx
+            resp = httpx.get(
+                f"https://api.github.com/repos/{repo.github_owner}/{repo.github_repo_name}"
+                f"/issues/comments/{run.trigger_comment_id}",
+                headers={
+                    "Authorization": f"Bearer {gh_token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            comment_body = resp.json().get("body", "")
+
+        # Build context for Claude
+        file_context = ""
+        if comment_file:
+            file_context = f"\nFile: {comment_file}"
+            if comment_line:
+                file_context += f" (line {comment_line})"
+
+        issue_context = (
+            f"You are working on a follow-up to a pull request.\n\n"
+            f"PR #{pr_number} on branch `{branch_name}`\n"
+            f"Linear issue: {run.linear_issue_identifier} - {run.linear_issue_title}\n\n"
+            f"A reviewer left this comment requesting changes:{file_context}\n"
+            f"---\n{comment_body}\n---\n\n"
+            f"Current PR diff:\n```diff\n{pr_diff}\n```\n\n"
+            f"Please make the requested changes on the existing branch. "
+            f"Do NOT open a new PR — just push commits to the existing branch."
+        )
+
+        # Get the current branch HEAD sha
+        head_sha = github_service.get_default_branch_sha(
+            gh_token, repo.github_owner, repo.github_repo_name, branch_name
+        )
+
+        # Run Claude agent on the existing branch
+        _log(db, run.id, LogLevel.info, "Running Claude agent for PR comment")
+        result = agent_service.provision_and_run(
+            gh_token=gh_token,
+            owner=repo.github_owner,
+            repo_name=repo.github_repo_name,
+            branch_name=branch_name,
+            base_sha=head_sha,
+            issue_context=issue_context,
+        )
+        run.claude_session_id = result.claude_session_id
+        run.claude_summary = result.summary
+        db.commit()
+
+        if not result.success:
+            raise RuntimeError(result.error or "Agent run failed")
+
+        # Reply to the comment on GitHub
+        _log(db, run.id, LogLevel.info, "Replying to comment on GitHub")
+        reply_body = (
+            f"I've pushed changes to address this comment.\n\n"
+            f"**Changes made:**\n{result.summary or 'See latest commits for details.'}"
+        )
+
+        try:
+            if is_review_comment:
+                github_service.reply_to_review_comment(
+                    gh_token, repo.github_owner, repo.github_repo_name,
+                    pr_number, run.trigger_comment_id, reply_body,
+                )
+            else:
+                github_service.create_issue_comment(
+                    gh_token, repo.github_owner, repo.github_repo_name,
+                    pr_number, reply_body,
+                )
+        except Exception:
+            logger.exception("Failed to reply to GitHub comment")
+
+        # Mark success
+        run.status = RunStatus.success
+        run.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        _log(db, run.id, LogLevel.info, "PR comment pipeline completed successfully")
+
+    except Exception as e:
+        logger.exception(f"PR comment pipeline failed for run {run.id}")
+        run.status = RunStatus.failed
+        run.completed_at = datetime.now(timezone.utc)
+        run.error_message = str(e)
+        db.commit()
+        _log(db, run.id, LogLevel.error, f"PR comment pipeline failed: {e}")
+
+
 def run_pipeline(run_id: str) -> None:
     db = SyncSessionLocal()
     try:
@@ -77,6 +232,11 @@ def _execute_pipeline(db, run_id: str) -> None:
     print(f"[BRAVEY] Pipeline executing for run {run_id}", flush=True)
     # Step 2: Load run and set running
     run = db.execute(select(AgentRun).where(AgentRun.id == run_id)).scalar_one()
+
+    # Route PR comment follow-ups to their own pipeline
+    if run.trigger_type == "pr_comment":
+        _execute_comment_pipeline(db, run)
+        return
     org = db.execute(
         select(Organization).where(Organization.id == run.org_id)
     ).scalar_one()

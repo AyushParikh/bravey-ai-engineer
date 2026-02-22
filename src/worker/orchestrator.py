@@ -244,7 +244,7 @@ def _execute_pipeline(db, run_id: str) -> None:
         # Wait for Linear's GitHub integration to process the PR first,
         # then override the status to "In Review"
         _log(db, run.id, LogLevel.info, "Waiting for Linear-GitHub sync before setting In Review")
-        time.sleep(2)
+        time.sleep(5)
         _log(db, run.id, LogLevel.info, "Updating Linear issue")
         if org.linear_access_token and org.linear_in_review_state_id:
             try:

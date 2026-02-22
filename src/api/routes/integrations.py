@@ -492,7 +492,19 @@ async def github_install_url(
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    install_url = f"https://github.com/apps/{settings.github_app_id}/installations/new"
+    # Look up the app slug via the GitHub API
+    app_jwt = github_service.generate_jwt(settings.github_app_id, settings.github_app_private_key)
+    resp = httpx.get(
+        "https://api.github.com/app",
+        headers={
+            "Authorization": f"Bearer {app_jwt}",
+            "Accept": "application/vnd.github+json",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    app_slug = resp.json()["slug"]
+    install_url = f"https://github.com/apps/{app_slug}/installations/new"
     return {"install_url": install_url}
 
 

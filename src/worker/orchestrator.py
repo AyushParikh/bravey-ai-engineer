@@ -253,7 +253,11 @@ def _execute_pipeline(db, run_id: str) -> None:
                     run.linear_issue_id,
                     org.linear_in_review_state_id,
                 )
+            except Exception:
+                logger.exception("Failed to update Linear issue state")
 
+        if comment_token and run.linear_issue_id:
+            try:
                 comment_body = (
                     f"**Bravey opened a PR**\n\n"
                     f"**PR:** [{pr_title}]({run.pr_url})\n"
@@ -266,7 +270,7 @@ def _execute_pipeline(db, run_id: str) -> None:
                     comment_body,
                 )
             except Exception:
-                logger.exception("Failed to update Linear issue")
+                logger.exception("Failed to comment on Linear issue")
 
         # Step 10b: DM the Linear issue creator via Slack
         if org.slack_bot_token:

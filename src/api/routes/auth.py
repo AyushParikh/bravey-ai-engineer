@@ -18,8 +18,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.get("/github/login")
-async def github_login():
-    state = str(uuid.uuid4())
+async def github_login(cli_redirect: str | None = None):
+    nonce = str(uuid.uuid4())
+    state = f"{nonce}|{cli_redirect}" if cli_redirect else nonce
     url = github_oauth_service.get_authorization_url(state)
     return {"authorization_url": url, "state": state}
 
@@ -101,8 +102,16 @@ async def github_callback(
     # Issue JWT
     token = jwt_service.create_access_token(user.id)
 
-    # Redirect to frontend with token
-    redirect_url = f"{settings.frontend_url}/auth/callback?token={token}"
+    # Redirect to CLI local server or frontend
+    cli_redirect = None
+    if state and "|" in state:
+        _, cli_redirect = state.split("|", 1)
+
+    if cli_redirect:
+        sep = "&" if "?" in cli_redirect else "?"
+        redirect_url = f"{cli_redirect}{sep}token={token}"
+    else:
+        redirect_url = f"{settings.frontend_url}/auth/callback?token={token}"
     return RedirectResponse(url=redirect_url)
 
 

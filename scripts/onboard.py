@@ -7,9 +7,13 @@ Usage:
 """
 
 import argparse
+import socket
 import sys
+import threading
 import time
 import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -106,10 +110,50 @@ class OnboardCLI:
 
     # --- Steps ---
 
+    @staticmethod
+    def _find_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _wait_for_token_via_local_server(self, port: int) -> str:
+        """Start a local HTTP server that captures the JWT token from the redirect."""
+        captured: dict[str, str | None] = {"token": None}
+
+        class CallbackHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                qs = parse_qs(urlparse(self.path).query)
+                token = qs.get("token", [None])[0]
+                captured["token"] = token
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><h2>Login successful!</h2>"
+                    b"<p>You can close this tab and return to the terminal.</p>"
+                    b"</body></html>"
+                )
+
+            def log_message(self, format, *args):
+                pass  # suppress request logs
+
+        server = HTTPServer(("127.0.0.1", port), CallbackHandler)
+        server.timeout = POLL_TIMEOUT
+
+        # Handle one request (the redirect)
+        while captured["token"] is None:
+            server.handle_request()
+
+        server.server_close()
+        return captured["token"] or ""
+
     def step_github_login(self) -> None:
         header("Step 1: GitHub Login")
 
-        resp = self.get("/auth/github/login")
+        port = self._find_free_port()
+        cli_redirect = f"http://127.0.0.1:{port}/callback"
+
+        resp = self.get("/auth/github/login", params={"cli_redirect": cli_redirect})
         if resp.status_code != 200:
             error(f"Failed to get login URL: {resp.text}")
             sys.exit(1)
@@ -119,15 +163,12 @@ class OnboardCLI:
 
         info("Opening GitHub login in your browser...")
         webbrowser.open(auth_url)
+        info("Waiting for login to complete...")
 
-        print()
-        print(f"{DIM}After logging in, you'll be redirected to a URL like:")
-        print(f"  https://your-frontend.com/auth/callback?token=eyJ...{RESET}")
-        print()
-        self.token = prompt("Paste the JWT token from the redirect URL")
+        self.token = self._wait_for_token_via_local_server(port)
 
         if not self.token:
-            error("No token provided")
+            error("No token received")
             sys.exit(1)
 
         # Verify token

@@ -444,6 +444,79 @@ async def linear_status(
     }
 
 
+@router.get("/linear/workflow-states")
+async def linear_workflow_states(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    """List all workflow states from the Linear workspace."""
+    _, org = user_org
+    if not org.linear_access_token:
+        raise HTTPException(status_code=400, detail="Linear not connected")
+
+    result = linear_service.graphql_request(
+        org.linear_access_token,
+        """
+        query {
+            workflowStates {
+                nodes {
+                    id
+                    name
+                    type
+                    team { id name }
+                }
+            }
+        }
+        """,
+    )
+    states = ((result.get("data") or {}).get("workflowStates") or {}).get("nodes") or []
+    return {"states": states}
+
+
+@router.post("/linear/configure-states")
+async def linear_configure_states(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
+):
+    """Auto-detect and configure In Progress / In Review state IDs."""
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if not org.linear_access_token:
+        raise HTTPException(status_code=400, detail="Linear not connected")
+
+    result = linear_service.graphql_request(
+        org.linear_access_token,
+        """
+        query {
+            workflowStates {
+                nodes { id name type }
+            }
+        }
+        """,
+    )
+    states = ((result.get("data") or {}).get("workflowStates") or {}).get("nodes") or []
+
+    in_progress_id = None
+    in_review_id = None
+    for s in states:
+        name_lower = s["name"].lower()
+        if name_lower == "in progress" and s["type"] == "started":
+            in_progress_id = s["id"]
+        elif name_lower == "in review" and s["type"] == "started":
+            in_review_id = s["id"]
+
+    if in_progress_id:
+        org.linear_in_progress_state_id = in_progress_id
+    if in_review_id:
+        org.linear_in_review_state_id = in_review_id
+    await db.commit()
+
+    return {
+        "in_progress_state_id": org.linear_in_progress_state_id,
+        "in_review_state_id": org.linear_in_review_state_id,
+    }
+
+
 @router.get("/linear/members")
 async def linear_members(
     user_org: tuple[User, Organization] = Depends(get_current_user_with_org),

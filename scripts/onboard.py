@@ -341,6 +341,25 @@ class OnboardCLI:
         )
         success("Linear bot installed!")
 
+        # Auto-configure workflow states
+        info("Configuring Linear workflow states...")
+        resp = self.post("/integrations/linear/configure-states")
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("in_progress_state_id") and data.get("in_review_state_id"):
+                success("Workflow states configured (In Progress + In Review)")
+            elif data.get("in_progress_state_id"):
+                success("In Progress state configured")
+                warn("'In Review' state not found — tickets won't be moved to In Review after PR.")
+            elif data.get("in_review_state_id"):
+                success("In Review state configured")
+                warn("'In Progress' state not found — tickets won't be moved to In Progress.")
+            else:
+                warn("Could not find 'In Progress' or 'In Review' workflow states.")
+                warn("You may need to configure these manually in Linear.")
+        else:
+            warn(f"Failed to configure workflow states: {resp.text}")
+
     def step_connect_slack(self) -> None:
         header("Step 6: Connect Slack")
 

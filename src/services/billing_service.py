@@ -100,7 +100,7 @@ async def notify_usage_limit_reached(
     message = (
         f"Bravey cannot pick up this ticket — your organization has used "
         f"{usage}/{limit} agent runs this month on the {plan.name} plan.\n\n"
-        f"Upgrade your plan at {settings.frontend_url}/billing"
+        f"Upgrade your plan."
     )
 
     # --- Comment on the issue / PR ---

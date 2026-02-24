@@ -10,9 +10,10 @@ from src.models.agent_run import AgentRun, RunStatus
 from src.models.organization import Organization
 from src.models.repository import Repository
 from src.models.slack_notification import NotificationType, SlackNotification
-from src.services import agent_service, github_service, slack_service
+from src.services import agent_service, github_service, jira_service, slack_service
 from src.services.linear_service import (
     create_comment,
+    ensure_valid_token,
     fetch_issue,
     update_issue_state,
 )
@@ -58,6 +59,41 @@ def _build_issue_context(issue: dict) -> str:
             user = c.get("user", {})
             name = user.get("name", "Unknown") if user else "Unknown"
             parts.append(f"  - {name}: {c['body']}")
+
+    return "\n".join(parts)
+
+
+def _build_jira_issue_context(issue: dict) -> str:
+    """Build context string from a Jira issue (REST API v3 format)."""
+    fields = issue.get("fields", {})
+    parts = [
+        f"Title: {fields.get('summary', '')}",
+        f"Key: {issue.get('key', '')}",
+        f"Description: {jira_service.adf_to_plaintext(fields.get('description')) or 'No description'}",
+    ]
+
+    priority = fields.get("priority")
+    if priority:
+        parts.append(f"Priority: {priority.get('name', 'None')}")
+
+    labels = fields.get("labels")
+    if labels:
+        parts.append(f"Labels: {', '.join(labels)}")
+
+    parent = fields.get("parent")
+    if parent:
+        parent_fields = parent.get("fields", {})
+        parts.append(f"Parent issue: {parent.get('key', '')} - {parent_fields.get('summary', '')}")
+
+    comment_data = fields.get("comment", {})
+    comments = comment_data.get("comments", []) if comment_data else []
+    if comments:
+        parts.append("Comments:")
+        for c in comments:
+            author = c.get("author", {})
+            name = author.get("displayName", "Unknown")
+            body_text = jira_service.adf_to_plaintext(c.get("body"))
+            parts.append(f"  - {name}: {body_text}")
 
     return "\n".join(parts)
 
@@ -148,10 +184,15 @@ def _execute_comment_pipeline(db, run: AgentRun) -> None:
             if comment_line:
                 file_context += f" (line {comment_line})"
 
+        # Use whichever issue tracker is relevant
+        issue_identifier = run.linear_issue_identifier or run.jira_issue_key or ""
+        issue_title = run.linear_issue_title or run.jira_issue_summary or ""
+        tracker_label = "Jira" if run.jira_issue_key else "Linear"
+
         issue_context = (
             f"You are working on a follow-up to a pull request.\n\n"
             f"PR #{pr_number} on branch `{branch_name}`\n"
-            f"Linear issue: {run.linear_issue_identifier} - {run.linear_issue_title}\n\n"
+            f"{tracker_label} issue: {issue_identifier} - {issue_title}\n\n"
             f"A reviewer left this comment requesting changes:{file_context}\n"
             f"---\n{comment_body}\n---\n\n"
             f"Current PR diff:\n```diff\n{pr_diff}\n```\n\n"
@@ -237,6 +278,9 @@ def _execute_pipeline(db, run_id: str) -> None:
     if run.trigger_type == "pr_comment":
         _execute_comment_pipeline(db, run)
         return
+
+    is_jira = run.trigger_type == "jira_assignment"
+
     org = db.execute(
         select(Organization).where(Organization.id == run.org_id)
     ).scalar_one()
@@ -255,44 +299,93 @@ def _execute_pipeline(db, run_id: str) -> None:
     slack_message_ts = None
     slack_channel = org.slack_default_channel_id
 
+    # Pre-initialize issue identifiers (may be updated after fetching full issue)
+    issue_identifier = run.jira_issue_key if is_jira else run.linear_issue_identifier
+    issue_title = run.jira_issue_summary if is_jira else run.linear_issue_title
+    issue_url = run.jira_issue_url if is_jira else run.linear_issue_url
+
     try:
-        # Step 3: Fetch full Linear issue context
-        _log(db, run.id, LogLevel.info, "Fetching Linear issue context")
-        issue = fetch_issue(org.linear_access_token, run.linear_issue_id)
-        run.linear_issue_title = issue.get("title", run.linear_issue_title)
-        run.linear_issue_url = issue.get("url", run.linear_issue_url)
-        db.commit()
+        # Refresh Linear tokens if needed
+        if not is_jira:
+            org.linear_access_token = ensure_valid_token(db, org, "admin")
+            if org.linear_bot_token:
+                org.linear_bot_token = ensure_valid_token(db, org, "bot")
 
-        issue_context = _build_issue_context(issue)
+        # Step 3: Fetch full issue context (Linear or Jira)
+        if is_jira:
+            _log(db, run.id, LogLevel.info, "Fetching Jira issue context")
+            issue = jira_service.fetch_issue(
+                org.jira_client_key, org.jira_shared_secret,
+                org.jira_base_url, run.jira_issue_key,
+            )
+            issue_fields = issue.get("fields", {})
+            run.jira_issue_summary = issue_fields.get("summary", run.jira_issue_summary)
+            db.commit()
+            issue_context = _build_jira_issue_context(issue)
+        else:
+            _log(db, run.id, LogLevel.info, "Fetching Linear issue context")
+            issue = fetch_issue(org.linear_access_token, run.linear_issue_id)
+            run.linear_issue_title = issue.get("title", run.linear_issue_title)
+            run.linear_issue_url = issue.get("url", run.linear_issue_url)
+            db.commit()
+            issue_context = _build_issue_context(issue)
 
-        # Step 3b: Post "picked up" comment on Linear issue (as bot)
-        comment_token = org.linear_bot_token or org.linear_access_token
-        if comment_token:
+        # Step 3b: Post "picked up" comment
+        picked_up_body = (
+            "Bravey has picked up this ticket and is working on it.\n\n"
+            "A pull request will be opened shortly."
+        )
+        if is_jira:
             try:
-                _log(db, run.id, LogLevel.info, "Posting picked-up comment on Linear")
-                picked_up_body = (
-                    f"**Bravey has picked up this ticket** and is working on it.\n\n"
-                    f"A pull request will be opened shortly."
-                )
-                create_comment(
-                    comment_token,
-                    run.linear_issue_id,
+                _log(db, run.id, LogLevel.info, "Posting picked-up comment on Jira")
+                jira_service.add_comment(
+                    org.jira_client_key, org.jira_shared_secret,
+                    org.jira_base_url, run.jira_issue_id,
                     picked_up_body,
                 )
             except Exception:
-                logger.exception("Failed to post picked-up comment on Linear")
+                logger.exception("Failed to post picked-up comment on Jira")
+        else:
+            comment_token = org.linear_bot_token or org.linear_access_token
+            if comment_token:
+                try:
+                    _log(db, run.id, LogLevel.info, "Posting picked-up comment on Linear")
+                    create_comment(
+                        comment_token,
+                        run.linear_issue_id,
+                        f"**{picked_up_body}**",
+                    )
+                except Exception:
+                    logger.exception("Failed to post picked-up comment on Linear")
 
-        # Step 3c: Set Linear issue to "In Progress"
-        if org.linear_access_token and org.linear_in_progress_state_id:
-            try:
-                _log(db, run.id, LogLevel.info, "Setting Linear issue to In Progress")
-                update_issue_state(
-                    org.linear_access_token,
-                    run.linear_issue_id,
-                    org.linear_in_progress_state_id,
-                )
-            except Exception:
-                logger.exception("Failed to set Linear issue to In Progress")
+        # Step 3c: Set issue to "In Progress"
+        if is_jira:
+            if org.jira_in_progress_status_id:
+                try:
+                    _log(db, run.id, LogLevel.info, "Setting Jira issue to In Progress")
+                    jira_service.transition_issue_to_status(
+                        org.jira_client_key, org.jira_shared_secret,
+                        org.jira_base_url, run.jira_issue_id,
+                        org.jira_in_progress_status_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to set Jira issue to In Progress")
+        else:
+            if org.linear_access_token and org.linear_in_progress_state_id:
+                try:
+                    _log(db, run.id, LogLevel.info, "Setting Linear issue to In Progress")
+                    update_issue_state(
+                        org.linear_access_token,
+                        run.linear_issue_id,
+                        org.linear_in_progress_state_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to set Linear issue to In Progress")
+
+        # Abstracted issue identifiers for downstream use
+        issue_identifier = run.jira_issue_key if is_jira else run.linear_issue_identifier
+        issue_title = run.jira_issue_summary if is_jira else run.linear_issue_title
+        issue_url = run.jira_issue_url if is_jira else run.linear_issue_url
 
         # Step 4: Post Slack "started" message
         if org.slack_bot_token and slack_channel:
@@ -302,9 +395,9 @@ def _execute_pipeline(db, run_id: str) -> None:
                 slack_resp = slack_service.post_run_started(
                     bot_token=org.slack_bot_token,
                     channel_id=slack_channel,
-                    issue_identifier=run.linear_issue_identifier,
-                    issue_title=run.linear_issue_title or "",
-                    issue_url=run.linear_issue_url or "",
+                    issue_identifier=issue_identifier,
+                    issue_title=issue_title or "",
+                    issue_url=issue_url or "",
                     assigned_by="User",
                 )
                 if slack_resp.get("ok"):
@@ -335,7 +428,7 @@ def _execute_pipeline(db, run_id: str) -> None:
 
         # Step 6: Create GitHub branch
         branch_name = github_service.slugify_branch_name(
-            run.linear_issue_identifier, run.linear_issue_title or ""
+            issue_identifier, issue_title or ""
         )
         _log(db, run.id, LogLevel.info, f"Creating branch {branch_name}")
 
@@ -368,11 +461,12 @@ def _execute_pipeline(db, run_id: str) -> None:
 
         # Step 9: Open GitHub Pull Request
         _log(db, run.id, LogLevel.info, "Opening pull request")
-        pr_title = f"{run.linear_issue_identifier}: {run.linear_issue_title}"
+        pr_title = f"{issue_identifier}: {issue_title}"
+        tracker_label = "Jira issue" if is_jira else "Linear issue"
         pr_body = (
             f"## Summary\n\n"
             f"{result.summary or 'No summary available.'}\n\n"
-            f"**Linear issue:** [{run.linear_issue_identifier}]({run.linear_issue_url})\n\n"
+            f"**{tracker_label}:** [{issue_identifier}]({issue_url})\n\n"
             f"---\n"
             f"*This PR was opened by [Bravey](https://bravey.co)*"
         )
@@ -400,43 +494,75 @@ def _execute_pipeline(db, run_id: str) -> None:
         except Exception:
             logger.warning("Failed to add label to PR")
 
-        # Step 10: Update Linear issue
-        # Wait for Linear's GitHub integration to process the PR first,
-        # then override the status to "In Review"
-        _log(db, run.id, LogLevel.info, "Waiting for Linear-GitHub sync before setting In Review")
-        time.sleep(5)
-        _log(db, run.id, LogLevel.info, "Updating Linear issue")
-        if org.linear_access_token and org.linear_in_review_state_id:
-            try:
-                update_issue_state(
-                    org.linear_access_token,
-                    run.linear_issue_id,
-                    org.linear_in_review_state_id,
-                )
-            except Exception:
-                logger.exception("Failed to update Linear issue state")
+        # Step 10: Update issue tracker — set to "In Review" and post PR comment
+        if is_jira:
+            _log(db, run.id, LogLevel.info, "Updating Jira issue")
+            if org.jira_in_review_status_id:
+                try:
+                    jira_service.transition_issue_to_status(
+                        org.jira_client_key, org.jira_shared_secret,
+                        org.jira_base_url, run.jira_issue_id,
+                        org.jira_in_review_status_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to transition Jira issue to In Review")
 
-        if comment_token and run.linear_issue_id:
             try:
-                comment_body = (
-                    f"**Bravey opened a PR**\n\n"
-                    f"**PR:** [{pr_title}]({run.pr_url})\n"
-                    f"**Branch:** `{branch_name}`\n\n"
+                comment_text = (
+                    f"Bravey opened a PR\n\n"
+                    f"PR: {pr_title} — {run.pr_url}\n"
+                    f"Branch: {branch_name}\n\n"
                     f"Changes made:\n{result.summary or 'See PR for details.'}"
                 )
-                create_comment(
-                    comment_token,
-                    run.linear_issue_id,
-                    comment_body,
+                jira_service.add_comment(
+                    org.jira_client_key, org.jira_shared_secret,
+                    org.jira_base_url, run.jira_issue_id,
+                    comment_text,
                 )
             except Exception:
-                logger.exception("Failed to comment on Linear issue")
+                logger.exception("Failed to comment on Jira issue")
+        else:
+            # Wait for Linear's GitHub integration to process the PR first,
+            # then override the status to "In Review"
+            _log(db, run.id, LogLevel.info, "Waiting for Linear-GitHub sync before setting In Review")
+            time.sleep(5)
+            _log(db, run.id, LogLevel.info, "Updating Linear issue")
+            if org.linear_access_token and org.linear_in_review_state_id:
+                try:
+                    update_issue_state(
+                        org.linear_access_token,
+                        run.linear_issue_id,
+                        org.linear_in_review_state_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to update Linear issue state")
 
-        # Step 10b: DM the Linear issue creator via Slack
+            comment_token = org.linear_bot_token or org.linear_access_token
+            if comment_token and run.linear_issue_id:
+                try:
+                    comment_body = (
+                        f"**Bravey opened a PR**\n\n"
+                        f"**PR:** [{pr_title}]({run.pr_url})\n"
+                        f"**Branch:** `{branch_name}`\n\n"
+                        f"Changes made:\n{result.summary or 'See PR for details.'}"
+                    )
+                    create_comment(
+                        comment_token,
+                        run.linear_issue_id,
+                        comment_body,
+                    )
+                except Exception:
+                    logger.exception("Failed to comment on Linear issue")
+
+        # Step 10b: DM the issue creator via Slack
         if org.slack_bot_token:
-            creator = issue.get("creator")
-            creator_email = creator.get("email") if creator else None
-            _log(db, run.id, LogLevel.info, f"Issue creator: {creator}, email: {creator_email}")
+            if is_jira:
+                reporter = issue.get("fields", {}).get("reporter") or issue.get("fields", {}).get("creator") or {}
+                creator_email = reporter.get("emailAddress")
+            else:
+                creator = issue.get("creator")
+                creator_email = creator.get("email") if creator else None
+            _log(db, run.id, LogLevel.info, f"Issue creator email: {creator_email}")
             if creator_email:
                 try:
                     _log(db, run.id, LogLevel.info, f"Looking up Slack user for {creator_email}")
@@ -447,7 +573,7 @@ def _execute_pipeline(db, run_id: str) -> None:
                     if slack_user_id:
                         dm_text = (
                             f"Bravey opened a PR for your ticket "
-                            f"*{run.linear_issue_identifier}: {run.linear_issue_title}*"
+                            f"*{issue_identifier}: {issue_title}*"
                         )
                         dm_blocks = [
                             {
@@ -456,8 +582,8 @@ def _execute_pipeline(db, run_id: str) -> None:
                                     "type": "mrkdwn",
                                     "text": (
                                         f"*Bravey opened a PR for your ticket "
-                                        f"<{run.linear_issue_url}|{run.linear_issue_identifier}: "
-                                        f"{run.linear_issue_title}>*\n\n"
+                                        f"<{issue_url}|{issue_identifier}: "
+                                        f"{issue_title}>*\n\n"
                                         f"<{run.pr_url}|#{run.pr_number}: {pr_title}>"
                                     ),
                                 },
@@ -481,7 +607,7 @@ def _execute_pipeline(db, run_id: str) -> None:
                 except Exception:
                     logger.exception("Failed to send Slack DM to issue creator")
             else:
-                _log(db, run.id, LogLevel.warn, "No creator email on Linear issue, skipping DM")
+                _log(db, run.id, LogLevel.warn, "No creator email on issue, skipping DM")
 
         # Step 11: Update Slack message
         if org.slack_bot_token and slack_channel and slack_message_ts:
@@ -492,11 +618,11 @@ def _execute_pipeline(db, run_id: str) -> None:
                     bot_token=org.slack_bot_token,
                     channel_id=slack_channel,
                     message_ts=slack_message_ts,
-                    issue_identifier=run.linear_issue_identifier,
-                    issue_url=run.linear_issue_url or "",
+                    issue_identifier=issue_identifier,
+                    issue_url=issue_url or "",
                     pr_url=run.pr_url or "",
                     pr_number=run.pr_number or 0,
-                    pr_title=run.linear_issue_title or "",
+                    pr_title=issue_title or "",
                     branch_name=branch_name,
                     duration=duration,
                 )
@@ -534,8 +660,8 @@ def _execute_pipeline(db, run_id: str) -> None:
                     bot_token=org.slack_bot_token,
                     channel_id=slack_channel,
                     message_ts=slack_message_ts,
-                    issue_identifier=run.linear_issue_identifier,
-                    issue_url=run.linear_issue_url or "",
+                    issue_identifier=issue_identifier,
+                    issue_url=issue_url or "",
                     error_message=str(e),
                     run_id=str(run.id),
                 )

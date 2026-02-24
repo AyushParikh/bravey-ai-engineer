@@ -1,7 +1,8 @@
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, String
+from sqlalchemy import BigInteger, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.encryption import EncryptedString
@@ -24,8 +25,12 @@ class Organization(Base, UUIDMixin, TimestampMixin):
     linear_webhook_id: Mapped[str | None] = mapped_column(String(100))
     linear_webhook_secret: Mapped[str | None] = mapped_column(EncryptedString())
     linear_access_token: Mapped[str | None] = mapped_column(EncryptedString())
+    linear_refresh_token: Mapped[str | None] = mapped_column(EncryptedString())
+    linear_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     linear_bravey_user_id: Mapped[str | None] = mapped_column(String(100))
     linear_bot_token: Mapped[str | None] = mapped_column(EncryptedString())
+    linear_bot_refresh_token: Mapped[str | None] = mapped_column(EncryptedString())
+    linear_bot_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     linear_in_progress_state_id: Mapped[str | None] = mapped_column(String(100))
     linear_in_review_state_id: Mapped[str | None] = mapped_column(String(100))
     github_installation_id: Mapped[int | None] = mapped_column(BigInteger)
@@ -34,6 +39,14 @@ class Organization(Base, UUIDMixin, TimestampMixin):
     slack_bot_token: Mapped[str | None] = mapped_column(EncryptedString())
     slack_default_channel_id: Mapped[str | None] = mapped_column(String(100))
     stripe_customer_id: Mapped[str | None] = mapped_column(String(100))
+
+    # Jira Connect App
+    jira_client_key: Mapped[str | None] = mapped_column(String(200), unique=True)
+    jira_shared_secret: Mapped[str | None] = mapped_column(EncryptedString())
+    jira_base_url: Mapped[str | None] = mapped_column(String(500))
+    jira_bravey_account_id: Mapped[str | None] = mapped_column(String(100))
+    jira_in_progress_status_id: Mapped[str | None] = mapped_column(String(100))
+    jira_in_review_status_id: Mapped[str | None] = mapped_column(String(100))
 
     # Relationships
     users: Mapped[list["User"]] = relationship(back_populates="organization")

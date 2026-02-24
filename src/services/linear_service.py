@@ -1,10 +1,21 @@
 import hashlib
 import hmac
+import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from src.config import settings
+
+logger = logging.getLogger(__name__)
+
 LINEAR_API_URL = "https://api.linear.app/graphql"
+LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
+LINEAR_MIGRATE_URL = "https://api.linear.app/oauth/migrate_old_token"
+
+# Refresh tokens when they expire within this window
+TOKEN_REFRESH_BUFFER = timedelta(minutes=5)
 
 
 def verify_signature(raw_body: bytes, signature: str, secret: str) -> bool:
@@ -103,3 +114,175 @@ def create_comment(
         CREATE_COMMENT_MUTATION,
         {"issueId": issue_id, "body": body},
     )
+
+
+# --- Token refresh ---
+
+
+def refresh_token(refresh_tok: str) -> dict:
+    """Exchange a refresh token for a new access + refresh token pair."""
+    resp = httpx.post(
+        LINEAR_TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "client_id": settings.linear_client_id,
+            "client_secret": settings.linear_client_secret,
+            "refresh_token": refresh_tok,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def migrate_old_token(access_token: str) -> dict:
+    """Migrate a long-lived token to get a refresh token (one-time)."""
+    resp = httpx.post(
+        LINEAR_MIGRATE_URL,
+        data={
+            "client_id": settings.linear_client_id,
+            "client_secret": settings.linear_client_secret,
+            "access_token": access_token,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _apply_token_refresh(org, token_data: dict, token_type: str) -> str:
+    """Write refreshed token data onto org fields. Returns the new access token."""
+    new_access = token_data["access_token"]
+    new_refresh = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in", 0)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in) if expires_in else None
+
+    if token_type == "bot":
+        org.linear_bot_token = new_access
+        org.linear_bot_refresh_token = new_refresh
+        org.linear_bot_token_expires_at = expires_at
+    else:
+        org.linear_access_token = new_access
+        org.linear_refresh_token = new_refresh
+        org.linear_token_expires_at = expires_at
+
+    return new_access
+
+
+def ensure_valid_token(db, org, token_type: str = "admin") -> str:
+    """Ensure the Linear token is valid (sync — for orchestrator).
+
+    Returns the current or refreshed access token.
+    """
+    if token_type == "bot":
+        access_tok = org.linear_bot_token
+        refresh_tok = org.linear_bot_refresh_token
+        expires_at = org.linear_bot_token_expires_at
+    else:
+        access_tok = org.linear_access_token
+        refresh_tok = org.linear_refresh_token
+        expires_at = org.linear_token_expires_at
+
+    if not access_tok:
+        return access_tok
+
+    now = datetime.now(timezone.utc)
+
+    # Token still valid with buffer
+    if expires_at is not None and expires_at - now > TOKEN_REFRESH_BUFFER:
+        return access_tok
+
+    # No expiry tracked and no refresh token → try migration
+    if expires_at is None and refresh_tok is None:
+        try:
+            logger.info("Attempting Linear token migration for %s (%s)", org.slug, token_type)
+            token_data = migrate_old_token(access_tok)
+            new_token = _apply_token_refresh(org, token_data, token_type)
+            db.commit()
+            logger.info("Linear token migration succeeded for %s (%s)", org.slug, token_type)
+            return new_token
+        except Exception:
+            logger.warning(
+                "Linear token migration failed for %s (%s), using existing token",
+                org.slug, token_type, exc_info=True,
+            )
+            return access_tok
+
+    # Need to refresh (expired or about to expire)
+    if refresh_tok:
+        try:
+            logger.info("Refreshing Linear token for %s (%s)", org.slug, token_type)
+            token_data = refresh_token(refresh_tok)
+            new_token = _apply_token_refresh(org, token_data, token_type)
+            db.commit()
+            logger.info("Linear token refresh succeeded for %s (%s)", org.slug, token_type)
+            return new_token
+        except Exception:
+            logger.warning(
+                "Linear token refresh failed for %s (%s), using existing token",
+                org.slug, token_type, exc_info=True,
+            )
+            return access_tok
+
+    # Have expiry but no refresh token — return as-is
+    return access_tok
+
+
+async def async_ensure_valid_token(db, org, token_type: str = "admin") -> str:
+    """Ensure the Linear token is valid (async — for API routes).
+
+    Returns the current or refreshed access token.
+    """
+    if token_type == "bot":
+        access_tok = org.linear_bot_token
+        refresh_tok = org.linear_bot_refresh_token
+        expires_at = org.linear_bot_token_expires_at
+    else:
+        access_tok = org.linear_access_token
+        refresh_tok = org.linear_refresh_token
+        expires_at = org.linear_token_expires_at
+
+    if not access_tok:
+        return access_tok
+
+    now = datetime.now(timezone.utc)
+
+    # Token still valid with buffer
+    if expires_at is not None and expires_at - now > TOKEN_REFRESH_BUFFER:
+        return access_tok
+
+    # No expiry tracked and no refresh token → try migration
+    if expires_at is None and refresh_tok is None:
+        try:
+            logger.info("Attempting Linear token migration for %s (%s)", org.slug, token_type)
+            token_data = migrate_old_token(access_tok)
+            new_token = _apply_token_refresh(org, token_data, token_type)
+            await db.commit()
+            logger.info("Linear token migration succeeded for %s (%s)", org.slug, token_type)
+            return new_token
+        except Exception:
+            logger.warning(
+                "Linear token migration failed for %s (%s), using existing token",
+                org.slug, token_type, exc_info=True,
+            )
+            return access_tok
+
+    # Need to refresh
+    if refresh_tok:
+        try:
+            logger.info("Refreshing Linear token for %s (%s)", org.slug, token_type)
+            token_data = refresh_token(refresh_tok)
+            new_token = _apply_token_refresh(org, token_data, token_type)
+            await db.commit()
+            logger.info("Linear token refresh succeeded for %s (%s)", org.slug, token_type)
+            return new_token
+        except Exception:
+            logger.warning(
+                "Linear token refresh failed for %s (%s), using existing token",
+                org.slug, token_type, exc_info=True,
+            )
+            return access_tok
+
+    return access_tok

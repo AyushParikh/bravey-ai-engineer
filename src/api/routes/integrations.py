@@ -1,6 +1,7 @@
 import logging
 import secrets
 import uuid
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import httpx
@@ -14,7 +15,8 @@ from src.config import settings
 from src.models.organization import Organization
 from src.models.repository import Repository
 from src.models.user import User
-from src.services import github_service, linear_service
+from src.services import github_service, jira_service, linear_service
+from src.services.linear_service import async_ensure_valid_token
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +201,13 @@ async def linear_connect(
             detail="Admin access required",
         )
 
+    # Either/or guard: reject if Jira is connected
+    if org.jira_client_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Jira is already connected. Disconnect Jira first.",
+        )
+
     state = f"{org.id}:{uuid.uuid4()}"
     params = {
         "client_id": settings.linear_client_id,
@@ -263,6 +272,12 @@ async def _handle_admin_callback(code: str, org_id_str: str, db: AsyncSession):
         raise HTTPException(status_code=400, detail="Failed to exchange code for token")
 
     access_token = token_data["access_token"]
+
+    # Store refresh token and expiry
+    org.linear_refresh_token = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in", 0)
+    if expires_in:
+        org.linear_token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
 
     # Get Linear org info
     try:
@@ -405,6 +420,12 @@ async def _handle_bot_callback(code: str, org_id_str: str, db: AsyncSession):
 
     bot_token = token_data["access_token"]
 
+    # Store bot refresh token and expiry
+    org.linear_bot_refresh_token = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in", 0)
+    if expires_in:
+        org.linear_bot_token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+
     # Get the bot's user ID (viewer query returns the app's identity)
     try:
         viewer_info = linear_service.graphql_request(
@@ -447,14 +468,16 @@ async def linear_status(
 @router.get("/linear/workflow-states")
 async def linear_workflow_states(
     user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
 ):
     """List all workflow states from the Linear workspace."""
     _, org = user_org
     if not org.linear_access_token:
         raise HTTPException(status_code=400, detail="Linear not connected")
 
+    token = await async_ensure_valid_token(db, org)
     result = linear_service.graphql_request(
-        org.linear_access_token,
+        token,
         """
         query {
             workflowStates {
@@ -484,8 +507,9 @@ async def linear_configure_states(
     if not org.linear_access_token:
         raise HTTPException(status_code=400, detail="Linear not connected")
 
+    token = await async_ensure_valid_token(db, org)
     result = linear_service.graphql_request(
-        org.linear_access_token,
+        token,
         """
         query {
             workflowStates {
@@ -520,14 +544,16 @@ async def linear_configure_states(
 @router.get("/linear/members")
 async def linear_members(
     user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
 ):
     """List all Linear workspace members."""
     _, org = user_org
     if not org.linear_access_token:
         raise HTTPException(status_code=400, detail="Linear not connected")
 
+    token = await async_ensure_valid_token(db, org)
     result = linear_service.graphql_request(
-        org.linear_access_token,
+        token,
         """
         query {
             users {
@@ -577,12 +603,140 @@ async def linear_disconnect(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     org.linear_access_token = None
+    org.linear_refresh_token = None
+    org.linear_token_expires_at = None
     org.linear_org_id = None
     org.linear_webhook_id = None
     org.linear_webhook_secret = None
     org.linear_bravey_user_id = None
     org.linear_bot_token = None
+    org.linear_bot_refresh_token = None
+    org.linear_bot_token_expires_at = None
 
+    await db.commit()
+    return {"status": "disconnected"}
+
+
+# --- Jira Integration Config ---
+
+
+@router.get("/jira/status")
+async def jira_status(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    _, org = user_org
+    return {
+        "connected": org.jira_client_key is not None,
+        "jira_base_url": org.jira_base_url,
+        "bot_user_configured": org.jira_bravey_account_id is not None,
+        "in_progress_status_configured": org.jira_in_progress_status_id is not None,
+        "in_review_status_configured": org.jira_in_review_status_id is not None,
+    }
+
+
+@router.get("/jira/statuses")
+async def jira_statuses(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    """List all Jira workflow statuses."""
+    _, org = user_org
+    if not org.jira_client_key:
+        raise HTTPException(status_code=400, detail="Jira not connected")
+
+    statuses = jira_service.get_statuses(
+        org.jira_client_key, org.jira_shared_secret, org.jira_base_url
+    )
+    return {"statuses": statuses}
+
+
+@router.post("/jira/configure-statuses")
+async def jira_configure_statuses(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
+):
+    """Auto-detect and configure In Progress / In Review status IDs."""
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if not org.jira_client_key:
+        raise HTTPException(status_code=400, detail="Jira not connected")
+
+    statuses = jira_service.get_statuses(
+        org.jira_client_key, org.jira_shared_secret, org.jira_base_url
+    )
+
+    in_progress_id = None
+    in_review_id = None
+    for s in statuses:
+        name_lower = s.get("name", "").lower()
+        category = s.get("statusCategory", {}).get("key", "")
+        if name_lower == "in progress" and category == "indeterminate":
+            in_progress_id = s["id"]
+        elif name_lower == "in review" and category == "indeterminate":
+            in_review_id = s["id"]
+
+    if in_progress_id:
+        org.jira_in_progress_status_id = in_progress_id
+    if in_review_id:
+        org.jira_in_review_status_id = in_review_id
+    await db.commit()
+
+    return {
+        "in_progress_status_id": org.jira_in_progress_status_id,
+        "in_review_status_id": org.jira_in_review_status_id,
+    }
+
+
+@router.get("/jira/members")
+async def jira_members(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+):
+    """List Jira workspace users."""
+    _, org = user_org
+    if not org.jira_client_key:
+        raise HTTPException(status_code=400, detail="Jira not connected")
+
+    users = jira_service.search_users(
+        org.jira_client_key, org.jira_shared_secret, org.jira_base_url
+    )
+    return {"members": users}
+
+
+class JiraBotUserRequest(BaseModel):
+    account_id: str
+
+
+@router.post("/jira/bot-user")
+async def jira_set_bot_user(
+    body: JiraBotUserRequest,
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually set the bot user accountId (fallback if auto-detect fails)."""
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    org.jira_bravey_account_id = body.account_id
+    await db.commit()
+    return {"status": "ok", "jira_bravey_account_id": org.jira_bravey_account_id}
+
+
+@router.post("/jira/disconnect")
+async def jira_disconnect(
+    user_org: tuple[User, Organization] = Depends(get_current_user_with_org),
+    db: AsyncSession = Depends(get_db),
+):
+    user, org = user_org
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    org.jira_client_key = None
+    org.jira_shared_secret = None
+    org.jira_base_url = None
+    org.jira_bravey_account_id = None
+    org.jira_in_progress_status_id = None
+    org.jira_in_review_status_id = None
     await db.commit()
     return {"status": "disconnected"}
 

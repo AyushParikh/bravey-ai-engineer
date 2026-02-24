@@ -7,7 +7,10 @@ import stripe
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import func as sa_func
+
 from src.config import settings
+from src.models.agent_run import AgentRun
 from src.models.organization import Organization
 from src.models.plan import Plan
 from src.models.subscription import Subscription, SubscriptionStatus
@@ -50,15 +53,16 @@ async def get_org_plan(
 
 
 async def get_usage_count(db: AsyncSession, org_id: uuid.UUID) -> int:
-    period = _current_period()
+    """Count agent runs created this month directly from agent_runs table."""
+    period = _current_period()  # "YYYY-MM"
+    period_start = datetime.strptime(period, "%Y-%m").replace(tzinfo=timezone.utc)
     result = await db.execute(
-        select(UsageRecord.agent_runs_count).where(
-            UsageRecord.org_id == org_id,
-            UsageRecord.period == period,
+        select(sa_func.count(AgentRun.id)).where(
+            AgentRun.org_id == org_id,
+            AgentRun.created_at >= period_start,
         )
     )
-    count = result.scalar_one_or_none()
-    return count or 0
+    return result.scalar_one()
 
 
 async def check_usage_limit(

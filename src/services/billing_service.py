@@ -186,7 +186,9 @@ async def increment_usage(db: AsyncSession, org_id: uuid.UUID) -> int:
         ),
         {"id": uuid.uuid4(), "org_id": org_id, "period": period},
     )
-    return result.scalar_one()
+    count = result.scalar_one()
+    await db.commit()
+    return count
 
 
 async def ensure_stripe_customer(

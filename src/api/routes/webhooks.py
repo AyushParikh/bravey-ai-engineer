@@ -88,10 +88,24 @@ async def _handle_pr_comment(
     await db.flush()
 
     # Check usage limit before creating a run
-    allowed, reason = await billing_service.check_usage_limit(db, parent_run.org_id)
+    allowed, reason, plan, usage = await billing_service.check_usage_limit(db, parent_run.org_id)
     if not allowed:
         event.processed = True
         await db.commit()
+        # Load org for notifications
+        org_result = await db.execute(
+            select(Organization).where(Organization.id == parent_run.org_id)
+        )
+        org = org_result.scalar_one_or_none()
+        if org and plan:
+            await billing_service.notify_usage_limit_reached(
+                org=org,
+                plan=plan,
+                usage=usage,
+                source="github",
+                pr_number=pr_number,
+                repo_full_name=repo_full_name,
+            )
         logger.warning("PR comment run skipped for org %s: %s", parent_run.org_id, reason)
         return
 
@@ -229,10 +243,18 @@ async def linear_webhook(
         return Response(status_code=200, content="OK - not triggered")
 
     # Check usage limit before creating a run
-    allowed, reason = await billing_service.check_usage_limit(db, org.id)
+    allowed, reason, plan, usage = await billing_service.check_usage_limit(db, org.id)
     if not allowed:
         event.processed = True
         await db.commit()
+        await billing_service.notify_usage_limit_reached(
+            org=org,
+            plan=plan,
+            usage=usage,
+            source="linear",
+            issue_id=payload.data.id,
+            issue_key=payload.data.identifier,
+        )
         return Response(status_code=200, content="OK - usage limit reached")
 
     # Check for existing active run for this issue (prevent duplicates)
@@ -507,10 +529,18 @@ async def jira_webhook(
         return Response(status_code=200, content="OK - not triggered")
 
     # Check usage limit
-    allowed, reason = await billing_service.check_usage_limit(db, org.id)
+    allowed, reason, plan, usage = await billing_service.check_usage_limit(db, org.id)
     if not allowed:
         event.processed = True
         await db.commit()
+        await billing_service.notify_usage_limit_reached(
+            org=org,
+            plan=plan,
+            usage=usage,
+            source="jira",
+            issue_id=payload.issue.id,
+            issue_key=payload.issue.key,
+        )
         return Response(status_code=200, content="OK - usage limit reached")
 
     # Duplicate check with advisory lock

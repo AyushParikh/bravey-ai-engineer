@@ -96,6 +96,24 @@ def update_issue_state(
     )
 
 
+UNASSIGN_ISSUE_MUTATION = """
+mutation UnassignIssue($id: String!) {
+  issueUpdate(id: $id, input: { assigneeId: null }) {
+    success
+    issue { id }
+  }
+}
+"""
+
+
+def unassign_issue(access_token: str, issue_id: str) -> dict:
+    return graphql_request(
+        access_token,
+        UNASSIGN_ISSUE_MUTATION,
+        {"id": issue_id},
+    )
+
+
 CREATE_COMMENT_MUTATION = """
 mutation CommentCreate($issueId: String!, $body: String!) {
   commentCreate(input: { issueId: $issueId, body: $body }) {

@@ -108,6 +108,16 @@ def transition_issue_to_status(
     return True
 
 
+def unassign_issue(
+    client_key: str, shared_secret: str, base_url: str, issue_id: str
+) -> None:
+    """Clear the assignee on a Jira issue."""
+    url = f"{base_url}/rest/api/3/issue/{issue_id}/assignee"
+    headers = _headers("PUT", f"/rest/api/3/issue/{issue_id}/assignee", client_key, shared_secret)
+    resp = httpx.put(url, headers=headers, json={"accountId": None}, timeout=15)
+    resp.raise_for_status()
+
+
 def add_comment(
     client_key: str, shared_secret: str, base_url: str, issue_id: str, body_text: str
 ) -> dict:

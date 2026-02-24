@@ -2,6 +2,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+import httpx
 import stripe
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,17 +63,112 @@ async def get_usage_count(db: AsyncSession, org_id: uuid.UUID) -> int:
 
 async def check_usage_limit(
     db: AsyncSession, org_id: uuid.UUID
-) -> tuple[bool, str]:
+) -> tuple[bool, str, Plan | None, int]:
     plan, _ = await get_org_plan(db, org_id)
     if plan.agent_runs_limit == -1:
-        return True, ""
+        return True, "", plan, 0
     usage = await get_usage_count(db, org_id)
     if usage >= plan.agent_runs_limit:
         return False, (
             f"Usage limit reached: {usage}/{plan.agent_runs_limit} "
             f"agent runs this month on the {plan.name} plan"
+        ), plan, usage
+    return True, "", plan, usage
+
+
+async def notify_usage_limit_reached(
+    org: Organization,
+    plan: Plan,
+    usage: int,
+    source: str,
+    issue_id: str | None = None,
+    issue_key: str | None = None,
+    pr_number: int | None = None,
+    repo_full_name: str | None = None,
+) -> None:
+    """Post a comment on the issue/PR, send a Slack message, and unassign Bravey.
+
+    source: "linear", "jira", or "github"
+    """
+    from src.services import github_service, jira_service, linear_service, slack_service
+
+    limit = plan.agent_runs_limit
+    message = (
+        f"Bravey cannot pick up this ticket — your organization has used "
+        f"{usage}/{limit} agent runs this month on the {plan.name} plan.\n\n"
+        f"Upgrade your plan at {settings.frontend_url}/billing"
+    )
+
+    # --- Comment on the issue / PR ---
+    try:
+        if source == "linear" and issue_id:
+            token = org.linear_bot_token or org.linear_access_token
+            if token:
+                linear_service.create_comment(token, issue_id, message)
+                linear_service.unassign_issue(token, issue_id)
+
+        elif source == "jira" and issue_id:
+            if org.jira_client_key and org.jira_shared_secret and org.jira_base_url:
+                jira_service.add_comment(
+                    org.jira_client_key, org.jira_shared_secret,
+                    org.jira_base_url, issue_id, message,
+                )
+                jira_service.unassign_issue(
+                    org.jira_client_key, org.jira_shared_secret,
+                    org.jira_base_url, issue_id,
+                )
+
+        elif source == "github" and pr_number and repo_full_name:
+            if org.github_installation_id:
+                gh_token = github_service.get_installation_token(
+                    settings.github_app_id,
+                    settings.github_app_private_key,
+                    org.github_installation_id,
+                )
+                owner, repo = repo_full_name.split("/", 1)
+                github_service.create_issue_comment(
+                    gh_token, owner, repo, pr_number, message,
+                )
+    except Exception:
+        logger.exception(
+            "Failed to post usage-limit comment on %s issue %s",
+            source, issue_id or issue_key or pr_number,
         )
-    return True, ""
+
+    # --- Slack notification ---
+    try:
+        if org.slack_bot_token and org.slack_default_channel_id:
+            identifier = issue_key or issue_id or (f"PR #{pr_number}" if pr_number else "unknown")
+            slack_service.join_channel(org.slack_bot_token, org.slack_default_channel_id)
+            httpx.post(
+                "https://slack.com/api/chat.postMessage",
+                json={
+                    "channel": org.slack_default_channel_id,
+                    "text": f"Usage limit reached for {identifier}",
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": (
+                                    f":warning: *Usage limit reached*\n\n"
+                                    f"Bravey cannot pick up *{identifier}* — "
+                                    f"your organization has used {usage}/{limit} "
+                                    f"agent runs this month on the {plan.name} plan.\n\n"
+                                    f"<{settings.frontend_url}/billing|Upgrade your plan>"
+                                ),
+                            },
+                        },
+                    ],
+                },
+                headers={
+                    "Authorization": f"Bearer {org.slack_bot_token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+    except Exception:
+        logger.exception("Failed to send Slack usage-limit notification")
 
 
 async def increment_usage(db: AsyncSession, org_id: uuid.UUID) -> int:

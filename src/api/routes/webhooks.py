@@ -254,6 +254,7 @@ async def linear_webhook(
             source="linear",
             issue_id=payload.data.id,
             issue_key=payload.data.identifier,
+            is_delegate=delegated_to_bravey,
         )
         return Response(status_code=200, content="OK - usage limit reached")
 

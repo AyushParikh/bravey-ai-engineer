@@ -89,10 +89,13 @@ async def notify_usage_limit_reached(
     issue_key: str | None = None,
     pr_number: int | None = None,
     repo_full_name: str | None = None,
+    is_delegate: bool = False,
 ) -> None:
-    """Post a comment on the issue/PR, send a Slack message, and unassign Bravey.
+    """Post a comment on the issue/PR, send a Slack message, and remove Bravey.
 
     source: "linear", "jira", or "github"
+    is_delegate: True when Bravey was added as a Linear delegate (agent),
+                 False when added as a regular assignee.
     """
     from src.services import github_service, jira_service, linear_service, slack_service
 
@@ -109,7 +112,10 @@ async def notify_usage_limit_reached(
             token = org.linear_bot_token or org.linear_access_token
             if token:
                 linear_service.create_comment(token, issue_id, message)
-                linear_service.unassign_issue(token, issue_id)
+                if is_delegate:
+                    linear_service.remove_delegate(token, issue_id)
+                else:
+                    linear_service.unassign_issue(token, issue_id)
 
         elif source == "jira" and issue_id:
             if org.jira_client_key and org.jira_shared_secret and org.jira_base_url:

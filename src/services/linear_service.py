@@ -96,6 +96,15 @@ def update_issue_state(
     )
 
 
+REMOVE_DELEGATE_MUTATION = """
+mutation RemoveDelegate($id: String!) {
+  issueUpdate(id: $id, input: { delegateId: null }) {
+    success
+    issue { id }
+  }
+}
+"""
+
 UNASSIGN_ISSUE_MUTATION = """
 mutation UnassignIssue($id: String!) {
   issueUpdate(id: $id, input: { assigneeId: null }) {
@@ -106,7 +115,17 @@ mutation UnassignIssue($id: String!) {
 """
 
 
+def remove_delegate(access_token: str, issue_id: str) -> dict:
+    """Remove the delegated agent (e.g. Bravey) from a Linear issue."""
+    return graphql_request(
+        access_token,
+        REMOVE_DELEGATE_MUTATION,
+        {"id": issue_id},
+    )
+
+
 def unassign_issue(access_token: str, issue_id: str) -> dict:
+    """Remove the assignee from a Linear issue."""
     return graphql_request(
         access_token,
         UNASSIGN_ISSUE_MUTATION,

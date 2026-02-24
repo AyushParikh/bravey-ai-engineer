@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # AWS SQS
     sqs_queue_url: str = ""
 
+    # Jira Connect App
+    jira_connect_app_key: str = ""  # e.g. "com.bravey.jira"
+    jira_bot_email: str = ""  # e.g. "bot@bravey.co"
+
     # AWS region
     aws_region: str = "us-east-1"
 

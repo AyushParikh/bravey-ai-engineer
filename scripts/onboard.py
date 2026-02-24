@@ -299,7 +299,7 @@ class OnboardCLI:
         choice = prompt("Select your project tracker (1-3)", "1")
 
         if choice == "2":
-            warn("Jira is not supported yet. Skipping.")
+            self._step_jira()
             return
         if choice == "3":
             info("Skipping project tracker setup.")
@@ -369,6 +369,79 @@ class OnboardCLI:
                 warn("You may need to configure these manually in Linear.")
         else:
             warn(f"Failed to configure workflow states: {resp.text}")
+
+    def _step_jira(self) -> None:
+        """Guide the admin through Jira Connect app installation."""
+        # Check current Jira status
+        resp = self.get("/integrations/jira/status")
+        jira_stat = resp.json() if resp.status_code == 200 else {}
+
+        if not jira_stat.get("connected"):
+            info("To connect Jira, install the Bravey Connect app on your Jira site.")
+            info("The Connect app descriptor is served at: <your-api>/jira/atlassian-connect.json")
+            info("Go to Jira → Settings → Apps → Manage Apps → Upload App → paste the descriptor URL.")
+            print()
+            input(f"{BOLD}Press Enter once you've installed the app...{RESET}")
+
+            # Poll until the app is installed
+            self.poll_status(
+                "/integrations/jira/status",
+                lambda d: d.get("connected"),
+                "Waiting for Jira Connect app installation",
+            )
+            success("Jira Connect app installed!")
+        else:
+            success("Jira already connected.")
+
+        # Check bot user
+        resp = self.get("/integrations/jira/status")
+        jira_stat = resp.json() if resp.status_code == 200 else {}
+
+        if not jira_stat.get("bot_user_configured"):
+            warn("Bot user not auto-detected.")
+            info("Make sure the Bravey bot account (bot@bravey.co) is added to your Jira site.")
+            info("Go to Jira → Settings → User Management → Invite users → add bot@bravey.co")
+            print()
+
+            if confirm("Try to detect the bot user now?"):
+                resp = self.get("/integrations/jira/members")
+                if resp.status_code == 200:
+                    members = resp.json().get("members", [])
+                    bot_members = [m for m in members if "bravey" in (m.get("displayName", "") + m.get("emailAddress", "")).lower()]
+                    if bot_members:
+                        bot = bot_members[0]
+                        resp = self.post(
+                            "/integrations/jira/bot-user",
+                            json={"account_id": bot["accountId"]},
+                        )
+                        if resp.status_code == 200:
+                            success(f"Bot user set: {bot.get('displayName', bot['accountId'])}")
+                        else:
+                            warn(f"Failed to set bot user: {resp.text}")
+                    else:
+                        warn("Bot user not found in workspace members.")
+                        info("You can manually set it later via POST /integrations/jira/bot-user")
+        else:
+            success("Jira bot user already configured.")
+
+        # Auto-configure workflow statuses
+        info("Configuring Jira workflow statuses...")
+        resp = self.post("/integrations/jira/configure-statuses")
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("in_progress_status_id") and data.get("in_review_status_id"):
+                success("Workflow statuses configured (In Progress + In Review)")
+            elif data.get("in_progress_status_id"):
+                success("In Progress status configured")
+                warn("'In Review' status not found — tickets won't be moved to In Review after PR.")
+            elif data.get("in_review_status_id"):
+                success("In Review status configured")
+                warn("'In Progress' status not found — tickets won't be moved to In Progress.")
+            else:
+                warn("Could not find 'In Progress' or 'In Review' workflow statuses.")
+                warn("You may need to configure these manually.")
+        else:
+            warn(f"Failed to configure workflow statuses: {resp.text}")
 
     def step_connect_slack(self) -> None:
         header("Step 6: Connect Slack")
@@ -451,6 +524,15 @@ class OnboardCLI:
             bot = f"{GREEN}Yes{RESET}" if data.get("bot_user_configured") else f"{YELLOW}No{RESET}"
             print(f"  Linear:       {status}")
             print(f"  Linear Bot:   {bot}")
+
+        resp = self.get("/integrations/jira/status")
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("connected"):
+                jstatus = f"{GREEN}Connected{RESET}"
+                bot = f"{GREEN}Yes{RESET}" if data.get("bot_user_configured") else f"{YELLOW}No{RESET}"
+                print(f"  Jira:         {jstatus}")
+                print(f"  Jira Bot:     {bot}")
 
         resp = self.get("/integrations/slack/status")
         if resp.status_code == 200:

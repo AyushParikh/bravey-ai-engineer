@@ -39,8 +39,8 @@ class AgentRun(Base, UUIDMixin, TimestampMixin):
     triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id")
     )
-    linear_issue_id: Mapped[str] = mapped_column(String(100))
-    linear_issue_identifier: Mapped[str] = mapped_column(String(20))
+    linear_issue_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    linear_issue_identifier: Mapped[str | None] = mapped_column(String(20), nullable=True)
     linear_issue_title: Mapped[str | None] = mapped_column(String(500))
     linear_issue_url: Mapped[str | None] = mapped_column(Text)
     status: Mapped[RunStatus] = mapped_column(
@@ -58,6 +58,12 @@ class AgentRun(Base, UUIDMixin, TimestampMixin):
     timeout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[str | None] = mapped_column(Text)
     claude_summary: Mapped[str | None] = mapped_column(Text)
+
+    # Jira issue fields
+    jira_issue_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    jira_issue_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    jira_issue_summary: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    jira_issue_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # PR-comment follow-up fields
     parent_run_id: Mapped[uuid.UUID | None] = mapped_column(

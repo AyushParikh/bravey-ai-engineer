@@ -13,8 +13,9 @@ from src.models.agent_run import AgentRun, RunStatus
 from src.models.organization import Organization
 from src.models.repository import Repository
 from src.models.webhook_event import WebhookEvent
+from src.schemas.jira import JiraWebhookPayload
 from src.schemas.linear import LinearWebhookPayload
-from src.services import billing_service, linear_service, sqs_service
+from src.services import billing_service, jira_service, linear_service, sqs_service
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ async def _handle_pr_comment(
         .where(
             AgentRun.pr_number == pr_number,
             Repository.full_name == repo_full_name,
-            AgentRun.trigger_type == "linear_assignment",
+            AgentRun.trigger_type.in_(["linear_assignment", "jira_assignment"]),
             AgentRun.status == RunStatus.success,
         )
         .order_by(AgentRun.created_at.desc())
@@ -94,7 +95,7 @@ async def _handle_pr_comment(
         logger.warning("PR comment run skipped for org %s: %s", parent_run.org_id, reason)
         return
 
-    # Create a follow-up AgentRun
+    # Create a follow-up AgentRun (copy both Linear and Jira fields from parent)
     run = AgentRun(
         org_id=parent_run.org_id,
         repo_id=parent_run.repo_id,
@@ -102,6 +103,10 @@ async def _handle_pr_comment(
         linear_issue_identifier=parent_run.linear_issue_identifier,
         linear_issue_title=parent_run.linear_issue_title,
         linear_issue_url=parent_run.linear_issue_url,
+        jira_issue_id=parent_run.jira_issue_id,
+        jira_issue_key=parent_run.jira_issue_key,
+        jira_issue_summary=parent_run.jira_issue_summary,
+        jira_issue_url=parent_run.jira_issue_url,
         status=RunStatus.queued,
         branch_name=parent_run.branch_name,
         pr_number=parent_run.pr_number,
@@ -406,5 +411,187 @@ async def github_webhook(
                     logger.info(
                         f"Linked GitHub installation {installation_id} to org {org.id}"
                     )
+
+    return Response(status_code=200, content="OK")
+
+
+@router.post("/jira")
+async def jira_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Handle Jira webhooks from the Connect app."""
+    raw_body = await request.body()
+
+    try:
+        payload_dict = json.loads(raw_body)
+        payload = JiraWebhookPayload(**payload_dict)
+    except Exception:
+        return Response(status_code=400, content="Invalid payload")
+
+    if not payload.issue:
+        return Response(status_code=200, content="OK - no issue")
+
+    # Extract client key from the Authorization header JWT claims
+    auth_header = request.headers.get("Authorization", "")
+
+    # Decode JWT without verification to get `iss` (clientKey),
+    # then verify with the org's shared secret.
+    import jwt as pyjwt
+
+    token = auth_header
+    if token.upper().startswith("JWT "):
+        token = token[4:]
+
+    try:
+        unverified = pyjwt.decode(
+            token, options={"verify_signature": False}, algorithms=["HS256"]
+        )
+        client_key = unverified.get("iss")
+    except Exception:
+        return Response(status_code=401, content="Invalid JWT")
+
+    if not client_key:
+        return Response(status_code=401, content="Missing client key in JWT")
+
+    # Look up organization by client key
+    result = await db.execute(
+        select(Organization).where(Organization.jira_client_key == client_key)
+    )
+    org = result.scalar_one_or_none()
+    if not org:
+        return Response(status_code=404, content="Organization not found")
+
+    # Verify the JWT with the org's shared secret
+    claims = jira_service.verify_jwt(auth_header, org.jira_shared_secret)
+    if not claims:
+        event = WebhookEvent(
+            org_id=org.id,
+            source="jira",
+            event_type=payload.webhookEvent,
+            delivery_id="",
+            payload=payload_dict,
+            signature_ok=False,
+            processed=False,
+        )
+        db.add(event)
+        await db.commit()
+        return Response(status_code=401, content="Invalid JWT signature")
+
+    # Persist webhook event
+    event = WebhookEvent(
+        org_id=org.id,
+        source="jira",
+        event_type=payload.webhookEvent,
+        delivery_id="",
+        payload=payload_dict,
+        signature_ok=True,
+        processed=False,
+    )
+    db.add(event)
+    await db.flush()
+
+    # Check trigger condition: assignee changed to the Bravey bot
+    bot_account_id = org.jira_bravey_account_id
+    triggered = False
+
+    if payload.changelog and bot_account_id:
+        for item in payload.changelog.items:
+            if item.field == "assignee" and item.to == bot_account_id:
+                triggered = True
+                break
+
+    if not triggered:
+        event.processed = True
+        await db.commit()
+        return Response(status_code=200, content="OK - not triggered")
+
+    # Check usage limit
+    allowed, reason = await billing_service.check_usage_limit(db, org.id)
+    if not allowed:
+        event.processed = True
+        await db.commit()
+        return Response(status_code=200, content="OK - usage limit reached")
+
+    # Duplicate check with advisory lock
+    from sqlalchemy import text
+
+    issue_id = payload.issue.id
+    lock_key = hash(issue_id) % (2**31)
+    lock_result = await db.execute(
+        text(f"SELECT pg_try_advisory_xact_lock({lock_key})")
+    )
+    got_lock = lock_result.scalar()
+    if not got_lock:
+        event.processed = True
+        await db.commit()
+        return Response(status_code=200, content="OK - concurrent processing")
+
+    from datetime import datetime, timedelta, timezone
+
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    existing_run = await db.execute(
+        select(AgentRun).where(
+            AgentRun.org_id == org.id,
+            AgentRun.jira_issue_id == issue_id,
+            (
+                AgentRun.status.in_(["queued", "running"])
+                | (
+                    (AgentRun.status == "success")
+                    & (AgentRun.completed_at >= recent_cutoff)
+                )
+            ),
+        )
+    )
+    if existing_run.scalar_one_or_none():
+        event.processed = True
+        await db.commit()
+        return Response(status_code=200, content="OK - run already in progress")
+
+    # Find repository
+    repo_result = await db.execute(
+        select(Repository).where(
+            Repository.org_id == org.id,
+            Repository.is_active.is_(True),
+        ).limit(1)
+    )
+    repo = repo_result.scalar_one_or_none()
+    if not repo:
+        logger.error(f"No active repository found for org {org.id}")
+        event.processed = True
+        await db.commit()
+        return Response(status_code=200, content="OK - no active repository")
+
+    # Build issue URL
+    issue_url = f"{org.jira_base_url}/browse/{payload.issue.key}"
+
+    # Create agent run
+    run = AgentRun(
+        org_id=org.id,
+        repo_id=repo.id,
+        jira_issue_id=issue_id,
+        jira_issue_key=payload.issue.key,
+        jira_issue_summary=(
+            payload.issue.fields.summary if payload.issue.fields else None
+        ),
+        jira_issue_url=issue_url,
+        status=RunStatus.queued,
+        trigger_type="jira_assignment",
+    )
+    db.add(run)
+    await db.flush()
+
+    event.run_id = run.id
+    event.processed = True
+    await db.commit()
+
+    # Increment usage
+    await billing_service.increment_usage(db, org.id)
+
+    # Enqueue to SQS
+    try:
+        sqs_service.send_run_message(str(run.id))
+    except Exception:
+        logger.exception(f"Failed to enqueue Jira run {run.id} to SQS")
 
     return Response(status_code=200, content="OK")

@@ -92,8 +92,9 @@ async def github_callback(
         except ValueError:
             pass
 
-    # Find user: id (== Supabase user ID) → github_id
-    # Never fall back to email — different providers can return different emails.
+    # The Supabase auth trigger pre-creates a users row with id = Supabase UUID.
+    # Look up by id first, then fall back to github_id for users created before
+    # this flow was introduced.
     user = None
 
     if supabase_uuid is not None:
@@ -110,7 +111,7 @@ async def github_callback(
 
     if user is None:
         user = User(
-            id=supabase_uuid,  # use Supabase UUID so both systems share one ID
+            id=supabase_uuid,
             github_id=github_id,
             github_login=github_login,
             github_username=github_login,
@@ -121,7 +122,7 @@ async def github_callback(
         )
         db.add(user)
     else:
-        # Update profile fields
+        # Update profile with GitHub info
         user.github_id = github_id
         user.github_login = github_login
         user.github_username = github_login

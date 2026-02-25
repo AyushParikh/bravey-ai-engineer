@@ -12,7 +12,7 @@ class User(Base, UUIDMixin, TimestampMixin):
     org_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("organizations.id"), nullable=True
     )
-    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    github_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
     github_login: Mapped[str] = mapped_column(String(255), nullable=False)
     avatar_url: Mapped[str | None] = mapped_column(String(512))
     name: Mapped[str | None] = mapped_column(String(255))

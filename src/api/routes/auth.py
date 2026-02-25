@@ -18,9 +18,14 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.get("/github/login")
-async def github_login(cli_redirect: str | None = None):
+async def github_login(
+    cli_redirect: str | None = None,
+    user_id: str | None = None,
+):
     nonce = str(uuid.uuid4())
-    state = f"{nonce}|{cli_redirect}" if cli_redirect else nonce
+    # state format: {nonce}|{cli_redirect}|{user_id}
+    # trailing segments may be empty but separators are always present
+    state = f"{nonce}|{cli_redirect or ''}|{user_id or ''}"
     url = github_oauth_service.get_authorization_url(state)
     return {"authorization_url": url, "state": state}
 
@@ -70,14 +75,42 @@ async def github_callback(
     avatar_url = gh_user.get("avatar_url")
     name = gh_user.get("name")
 
-    # Find or create user
-    result = await db.execute(
-        select(User).where(User.github_id == github_id)
-    )
-    user = result.scalar_one_or_none()
+    # Parse state: {nonce}|{cli_redirect}|{supabase_id}
+    cli_redirect = None
+    supabase_id_str = None
+    if state:
+        parts = state.split("|", 2)
+        if len(parts) >= 2:
+            cli_redirect = parts[1] or None
+        if len(parts) >= 3:
+            supabase_id_str = parts[2] or None
+
+    supabase_uuid: uuid.UUID | None = None
+    if supabase_id_str:
+        try:
+            supabase_uuid = uuid.UUID(supabase_id_str)
+        except ValueError:
+            pass
+
+    # Find user: id (== Supabase user ID) → github_id
+    # Never fall back to email — different providers can return different emails.
+    user = None
+
+    if supabase_uuid is not None:
+        result = await db.execute(
+            select(User).where(User.id == supabase_uuid)
+        )
+        user = result.scalar_one_or_none()
+
+    if user is None:
+        result = await db.execute(
+            select(User).where(User.github_id == github_id)
+        )
+        user = result.scalar_one_or_none()
 
     if user is None:
         user = User(
+            id=supabase_uuid,  # use Supabase UUID so both systems share one ID
             github_id=github_id,
             github_login=github_login,
             github_username=github_login,
@@ -89,6 +122,7 @@ async def github_callback(
         db.add(user)
     else:
         # Update profile fields
+        user.github_id = github_id
         user.github_login = github_login
         user.github_username = github_login
         user.avatar_url = avatar_url
@@ -101,11 +135,6 @@ async def github_callback(
 
     # Issue JWT
     token = jwt_service.create_access_token(user.id)
-
-    # Redirect to CLI local server or frontend
-    cli_redirect = None
-    if state and "|" in state:
-        _, cli_redirect = state.split("|", 1)
 
     if cli_redirect:
         sep = "&" if "?" in cli_redirect else "?"

@@ -10,6 +10,7 @@ from src.models.slack_notification import SlackNotification
 from src.models.plan import Plan
 from src.models.subscription import Subscription
 from src.models.usage_record import UsageRecord
+from src.models.stripe_customer import StripeCustomer
 
 __all__ = [
     "Base",
@@ -24,4 +25,5 @@ __all__ = [
     "Plan",
     "Subscription",
     "UsageRecord",
+    "StripeCustomer",
 ]

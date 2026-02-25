@@ -5,10 +5,11 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_current_user_with_org, get_db, require_admin
+from src.api.dependencies import get_current_user, get_current_user_with_org, get_db, require_admin
 from src.config import settings
 from src.models.organization import Organization
 from src.models.plan import Plan
+from src.models.stripe_customer import StripeCustomer
 from src.models.user import User
 from src.schemas.billing import (
     BillingStatusResponse,
@@ -23,6 +24,31 @@ from src.services import billing_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/billing", tags=["billing"])
+
+
+@router.post("/create-stripe-customer")
+async def create_stripe_customer(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Idempotent — skip if already exists
+    result = await db.execute(
+        select(StripeCustomer).where(StripeCustomer.user_id == user.id)
+    )
+    if result.scalar_one_or_none():
+        return {"response": "success"}
+
+    stripe.api_key = settings.stripe_secret_key
+    customer = stripe.Customer.create(
+        name=user.name or user.github_login,
+        email=user.email,
+        metadata={"user_id": str(user.id)},
+    )
+
+    db.add(StripeCustomer(user_id=user.id, stripe_id=customer.id, plan=None))
+    await db.commit()
+
+    return {"response": "success"}
 
 
 @router.get("/plans", response_model=list[PlanPublic])

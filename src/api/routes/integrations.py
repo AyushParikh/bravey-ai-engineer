@@ -291,7 +291,35 @@ async def _handle_admin_callback(code: str, org_id_str: str, db: AsyncSession):
         raise HTTPException(status_code=400, detail="Failed to fetch Linear organization info")
 
     org.linear_access_token = access_token
-    org.linear_org_id = linear_org.get("id")
+    new_linear_org_id = linear_org.get("id")
+
+    # If another Bravey org already has this linear_org_id, clear it
+    if new_linear_org_id:
+        existing_org = await db.execute(
+            select(Organization).where(
+                Organization.linear_org_id == new_linear_org_id,
+                Organization.id != org.id,
+            )
+        )
+        old_org = existing_org.scalar_one_or_none()
+        if old_org:
+            logger.info(
+                "Transferring linear_org_id %s from org %s to org %s",
+                new_linear_org_id, old_org.id, org.id,
+            )
+            old_org.linear_org_id = None
+            old_org.linear_webhook_id = None
+            old_org.linear_webhook_secret = None
+            old_org.linear_access_token = None
+            old_org.linear_refresh_token = None
+            old_org.linear_token_expires_at = None
+            old_org.linear_bravey_user_id = None
+            old_org.linear_bot_token = None
+            old_org.linear_bot_refresh_token = None
+            old_org.linear_bot_token_expires_at = None
+            await db.flush()
+
+    org.linear_org_id = new_linear_org_id
 
     # Create webhook (requires admin-level token)
     webhook_secret = secrets.token_hex(32)

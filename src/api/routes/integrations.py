@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,18 @@ LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 
 SLACK_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+
+
+def _close_tab_response(title: str = "Connected") -> HTMLResponse:
+    """Return an HTML page that closes the browser tab."""
+    return HTMLResponse(
+        f"""<!DOCTYPE html>
+<html><head><title>{title}</title></head>
+<body>
+<p>{title} successfully. You can close this tab.</p>
+<script>window.close();</script>
+</body></html>"""
+    )
 
 
 # --- Slack OAuth ---
@@ -97,10 +110,7 @@ async def slack_callback(
     org.slack_team_id = token_data.get("team", {}).get("id")
     await db.commit()
 
-    return {
-        "status": "connected",
-        "slack_team_id": org.slack_team_id,
-    }
+    return _close_tab_response("Slack connected")
 
 
 @router.get("/slack/status")
@@ -370,19 +380,7 @@ async def _handle_admin_callback(code: str, org_id_str: str, db: AsyncSession):
 
     await db.commit()
 
-    next_step = ""
-    if not org.linear_webhook_id:
-        next_step = "Webhook creation failed — check logs."
-    elif not org.linear_bravey_user_id:
-        next_step = "Install the bot: GET /integrations/linear/install-bot"
-
-    return {
-        "status": "connected",
-        "linear_org_id": org.linear_org_id,
-        "webhook_configured": org.linear_webhook_id is not None,
-        "bot_installed": org.linear_bravey_user_id is not None,
-        "next_step": next_step,
-    }
+    return _close_tab_response("Linear connected")
 
 
 @router.get("/linear/install-bot")
@@ -473,11 +471,7 @@ async def _handle_bot_callback(code: str, org_id_str: str, db: AsyncSession):
     org.linear_bot_token = bot_token
     await db.commit()
 
-    return {
-        "status": "bot_installed",
-        "bot_user_id": bot_user_id,
-        "bot_name": viewer.get("displayName") or viewer.get("name"),
-    }
+    return _close_tab_response("Bravey bot installed")
 
 
 @router.get("/linear/status")

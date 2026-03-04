@@ -689,6 +689,26 @@ async def slack_events(
     if not team_id or not channel_id or not message_text:
         return Response(status_code=200, content="OK")
 
+    # Reject messages that are too short / vague to act on
+    if len(message_text.split()) < 3:
+        # Look up org just for the bot token to reply
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Organization).where(Organization.slack_team_id == team_id)
+            )
+            org = result.scalar_one_or_none()
+            if org and org.slack_bot_token:
+                try:
+                    slack_service.post_thread_message(
+                        org.slack_bot_token, channel_id, thread_ts,
+                        "Hey! Could you give me more detail? Try something like:\n"
+                        "- \"What does the auth module do in <repo-name>?\"\n"
+                        "- \"In <repo-name>, add a health check endpoint\"",
+                    )
+                except Exception:
+                    logger.exception("Failed to post Slack help reply")
+        return Response(status_code=200, content="OK")
+
     # DB-dependent processing
     async with AsyncSessionLocal() as db:
         # Look up organization by Slack team ID

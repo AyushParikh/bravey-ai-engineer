@@ -20,6 +20,7 @@ GITHUB_HEADERS_BASE = {
 
 MAX_TOOL_TURNS = 50
 MODEL = "claude-sonnet-4-20250514"
+MODEL_FAST = "claude-haiku-4-20250414"
 
 
 
@@ -473,7 +474,7 @@ def classify_slack_intent(message_text: str, thread_context: str = "") -> str:
         prompt = f"Thread context:\n{thread_context}\n\nLatest message: {message_text}"
 
     response = client.messages.create(
-        model=MODEL,
+        model=MODEL_FAST,
         max_tokens=16,
         system=(
             "You are a classifier for a coding assistant bot in Slack. "
@@ -506,7 +507,7 @@ def generate_conversation_reply(
         prompt = f"Thread context:\n{thread_context}\n\nLatest message: {message_text}"
 
     response = client.messages.create(
-        model=MODEL,
+        model=MODEL_FAST,
         max_tokens=512,
         system=(
             "You are Bravey, a friendly AI coding assistant in Slack. "

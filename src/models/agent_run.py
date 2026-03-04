@@ -74,6 +74,11 @@ class AgentRun(Base, UUIDMixin, TimestampMixin):
     )
     trigger_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # Slack mention fields
+    slack_channel_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    slack_thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    slack_message_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     organization = relationship("Organization", back_populates="agent_runs")
     repository = relationship("Repository", back_populates="agent_runs")
     triggered_by = relationship("User")

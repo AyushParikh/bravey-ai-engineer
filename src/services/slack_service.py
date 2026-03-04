@@ -1,4 +1,7 @@
+import hashlib
+import hmac
 import logging
+import time
 
 import httpx
 
@@ -159,6 +162,55 @@ def update_run_completed(
                 },
             ],
         },
+        headers=_headers(bot_token),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def verify_slack_signature(
+    signing_secret: str, timestamp: str, body: bytes, signature: str
+) -> bool:
+    """Verify a Slack request signature (X-Slack-Signature)."""
+    # Reject requests older than 5 minutes
+    try:
+        if abs(time.time() - int(timestamp)) > 60 * 5:
+            return False
+    except (ValueError, TypeError):
+        return False
+
+    sig_basestring = f"v0:{timestamp}:{body.decode('utf-8')}"
+    computed = (
+        "v0="
+        + hmac.new(
+            signing_secret.encode("utf-8"),
+            sig_basestring.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+    )
+    return hmac.compare_digest(computed, signature)
+
+
+def post_thread_message(
+    bot_token: str,
+    channel_id: str,
+    thread_ts: str,
+    text: str,
+    blocks: list | None = None,
+) -> dict:
+    """Post a reply in a Slack thread."""
+    payload: dict = {
+        "channel": channel_id,
+        "thread_ts": thread_ts,
+        "text": text,
+    }
+    if blocks:
+        payload["blocks"] = blocks
+
+    resp = httpx.post(
+        f"{SLACK_API_URL}/chat.postMessage",
+        json=payload,
         headers=_headers(bot_token),
         timeout=10,
     )

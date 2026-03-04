@@ -22,6 +22,7 @@ MAX_TOOL_TURNS = 50
 MODEL = "claude-sonnet-4-20250514"
 
 
+
 class AgentResult:
     def __init__(
         self,
@@ -270,6 +271,8 @@ TOOLS = [
     },
 ]
 
+READ_ONLY_TOOLS = TOOLS[:3]  # read_file, list_files, search_files
+
 
 # ---------------------------------------------------------------------------
 # Tool dispatch
@@ -453,5 +456,140 @@ def provision_and_run(
         return AgentResult(
             success=False,
             claude_session_id=f"session-{session_id}",
+            error=str(e),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Slack intent classification
+# ---------------------------------------------------------------------------
+
+def classify_slack_intent(message_text: str) -> str:
+    """Classify a Slack message as 'question' or 'action' using Claude."""
+    client = Anthropic(api_key=settings.anthropic_api_key)
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=16,
+        system=(
+            "You are a classifier. Given a user message, respond with exactly "
+            "one word: 'question' if the user is asking a question about the "
+            "codebase, or 'action' if the user is requesting a code change. "
+            "Respond with only that single word, nothing else."
+        ),
+        messages=[{"role": "user", "content": message_text}],
+    )
+    result = response.content[0].text.strip().lower()
+    if result not in ("question", "action"):
+        return "action"
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Read-only Q&A agent
+# ---------------------------------------------------------------------------
+
+def answer_question(
+    gh_token: str,
+    owner: str,
+    repo_name: str,
+    branch_name: str,
+    question: str,
+    max_turns: int = 20,
+) -> AgentResult:
+    """Run a read-only Claude agent to answer a question about the codebase."""
+    session_id = uuid.uuid4().hex[:12]
+
+    system_prompt = (
+        "You are Bravey, an AI coding assistant. You have read-only access to a "
+        f"GitHub repository ({owner}/{repo_name}) on branch `{branch_name}`.\n\n"
+        "You can read files, list directories, and search code. "
+        "Use these tools to explore the codebase and answer the user's question.\n\n"
+        "Provide a clear, concise answer. Include relevant code snippets or file "
+        "paths when helpful. Keep your answer under 2500 characters."
+    )
+
+    client = Anthropic(api_key=settings.anthropic_api_key)
+    messages = [{"role": "user", "content": question}]
+
+    try:
+        for turn in range(max_turns):
+            logger.info(f"[BRAVEY-QA] Agent turn {turn + 1}/{max_turns}")
+
+            response = client.messages.create(
+                model=MODEL,
+                max_tokens=4096,
+                system=system_prompt,
+                tools=READ_ONLY_TOOLS,
+                messages=messages,
+            )
+
+            if response.stop_reason == "end_turn":
+                summary = ""
+                for block in response.content:
+                    if block.type == "text":
+                        summary += block.text
+                return AgentResult(
+                    success=True,
+                    claude_session_id=f"qa-{session_id}",
+                    summary=summary or "I couldn't find an answer.",
+                )
+
+            if response.stop_reason == "tool_use":
+                assistant_content = []
+                tool_results = []
+
+                for block in response.content:
+                    if block.type == "text":
+                        assistant_content.append({
+                            "type": "text",
+                            "text": block.text,
+                        })
+                    elif block.type == "tool_use":
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        })
+
+                        result_text = _execute_tool(
+                            block.name, block.input,
+                            gh_token, owner, repo_name, branch_name,
+                        )
+
+                        if len(result_text) > 50000:
+                            result_text = result_text[:50000] + "\n... (truncated)"
+
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result_text,
+                        })
+
+                messages.append({"role": "assistant", "content": assistant_content})
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                summary = ""
+                for block in response.content:
+                    if block.type == "text":
+                        summary += block.text
+                return AgentResult(
+                    success=True,
+                    claude_session_id=f"qa-{session_id}",
+                    summary=summary or "Agent stopped unexpectedly.",
+                )
+
+        return AgentResult(
+            success=False,
+            claude_session_id=f"qa-{session_id}",
+            error=f"Q&A agent exhausted maximum {max_turns} turns.",
+            summary="I ran out of turns while searching for an answer.",
+        )
+
+    except Exception as e:
+        logger.exception(f"Q&A agent failed: {e}")
+        return AgentResult(
+            success=False,
+            claude_session_id=f"qa-{session_id}",
             error=str(e),
         )

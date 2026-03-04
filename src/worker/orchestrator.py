@@ -259,7 +259,7 @@ def _execute_comment_pipeline(db, run: AgentRun) -> None:
 
 
 def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
-    """Handle a Slack @mention: classify intent, answer question or open PR."""
+    """Handle a Slack @mention with full thread context and 3-way intent."""
     import re
 
     now = datetime.now(timezone.utc)
@@ -273,17 +273,105 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
     org = db.execute(
         select(Organization).where(Organization.id == run.org_id)
     ).scalar_one()
-    repo = db.execute(
-        select(Repository).where(Repository.id == run.repo_id)
-    ).scalar_one()
 
     channel_id = run.slack_channel_id
     thread_ts = run.slack_thread_ts
     message_text = run.slack_message_text or ""
 
     try:
-        # Generate GitHub installation token
-        _log(db, run.id, LogLevel.info, "Generating GitHub installation token")
+        # Fetch thread context for conversation awareness
+        thread_context = ""
+        if org.slack_bot_token and channel_id and thread_ts:
+            try:
+                thread_msgs = slack_service.fetch_thread_messages(
+                    org.slack_bot_token, channel_id, thread_ts
+                )
+                # Build context string (exclude the current message which is last)
+                if len(thread_msgs) > 1:
+                    context_parts = []
+                    for msg in thread_msgs[:-1]:
+                        role = "Bravey" if msg["is_bot"] else "User"
+                        context_parts.append(f"{role}: {msg['text']}")
+                    thread_context = "\n".join(context_parts)
+            except Exception:
+                logger.exception("Failed to fetch Slack thread context")
+
+        # Classify intent with thread context
+        _log(db, run.id, LogLevel.info, "Classifying Slack message intent")
+        intent = agent_service.classify_slack_intent(message_text, thread_context)
+        _log(db, run.id, LogLevel.info, f"Intent classified as: {intent}")
+
+        # --- Conversation: reply directly, no codebase access needed ---
+        if intent == "conversation":
+            reply = agent_service.generate_conversation_reply(
+                message_text, thread_context
+            )
+            if org.slack_bot_token and channel_id and thread_ts:
+                slack_service.post_thread_message(
+                    org.slack_bot_token, channel_id, thread_ts, reply,
+                )
+            run.claude_summary = reply
+            run.status = RunStatus.success
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            _log(db, run.id, LogLevel.info, "Slack conversation reply sent")
+            return
+
+        # --- For question/action, we need a repo and GitHub token ---
+        # Resolve repo from message text
+        repos = db.execute(
+            select(Repository).where(
+                Repository.org_id == org.id,
+                Repository.is_active.is_(True),
+            )
+        ).scalars().all()
+
+        if not repos:
+            if org.slack_bot_token and channel_id and thread_ts:
+                slack_service.post_thread_message(
+                    org.slack_bot_token, channel_id, thread_ts,
+                    "No active repositories found. Please connect a repo first.",
+                )
+            run.status = RunStatus.failed
+            run.completed_at = datetime.now(timezone.utc)
+            run.error_message = "No active repositories"
+            db.commit()
+            return
+
+        matched_repo = None
+        message_lower = message_text.lower()
+        for repo in repos:
+            if repo.github_repo_name.lower() in message_lower:
+                matched_repo = repo
+                break
+
+        if not matched_repo and len(repos) == 1:
+            matched_repo = repos[0]
+
+        if not matched_repo:
+            repo_names = ", ".join(f"`{r.github_repo_name}`" for r in repos)
+            if org.slack_bot_token and channel_id and thread_ts:
+                slack_service.post_thread_message(
+                    org.slack_bot_token, channel_id, thread_ts,
+                    f"Which repo should I look at? You have: {repo_names}",
+                )
+            run.status = RunStatus.success
+            run.completed_at = datetime.now(timezone.utc)
+            run.claude_summary = "Asked user to specify repo"
+            db.commit()
+            return
+
+        # Update run with resolved repo
+        run.repo_id = matched_repo.id
+        db.commit()
+
+        # Post "thinking" message now that we know real work is needed
+        if org.slack_bot_token and channel_id and thread_ts:
+            slack_service.post_thread_message(
+                org.slack_bot_token, channel_id, thread_ts,
+                "On it! Give me a moment...",
+            )
+
         from src.config import settings
 
         gh_token = github_service.get_installation_token(
@@ -292,19 +380,14 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
             installation_id=org.github_installation_id,
         )
 
-        # Classify intent
-        _log(db, run.id, LogLevel.info, "Classifying Slack message intent")
-        intent = agent_service.classify_slack_intent(message_text)
-        _log(db, run.id, LogLevel.info, f"Intent classified as: {intent}")
-
+        # --- Question: read-only agent ---
         if intent == "question":
-            # Answer question using read-only tools on default branch
             _log(db, run.id, LogLevel.info, "Running Q&A agent")
             result = agent_service.answer_question(
                 gh_token=gh_token,
-                owner=repo.github_owner,
-                repo_name=repo.github_repo_name,
-                branch_name=repo.default_branch,
+                owner=matched_repo.github_owner,
+                repo_name=matched_repo.github_repo_name,
+                branch_name=matched_repo.default_branch,
                 question=message_text,
             )
             run.claude_session_id = result.claude_session_id
@@ -314,7 +397,6 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
             if not result.success:
                 raise RuntimeError(result.error or "Q&A agent failed")
 
-            # Post answer in thread (truncate if too long for Slack)
             answer = result.summary or "I couldn't find an answer."
             if len(answer) > 2900:
                 answer = answer[:2900] + "..."
@@ -329,26 +411,24 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
             db.commit()
             _log(db, run.id, LogLevel.info, "Slack Q&A pipeline completed")
 
+        # --- Action: full agent + PR ---
         else:
-            # Action: create branch, run agent, open PR
             _log(db, run.id, LogLevel.info, "Running action agent")
 
-            # Create branch from message text
             slug = re.sub(r"[^a-z0-9]+", "-", message_text[:60].lower()).strip("-")
             branch_name = f"slack/{slug}"
 
             head_sha = github_service.get_default_branch_sha(
-                gh_token, repo.github_owner, repo.github_repo_name,
-                repo.default_branch,
+                gh_token, matched_repo.github_owner,
+                matched_repo.github_repo_name, matched_repo.default_branch,
             )
             github_service.create_branch(
-                gh_token, repo.github_owner, repo.github_repo_name,
-                branch_name, head_sha,
+                gh_token, matched_repo.github_owner,
+                matched_repo.github_repo_name, branch_name, head_sha,
             )
             run.branch_name = branch_name
             db.commit()
 
-            # Build issue context from the Slack message
             issue_context = (
                 f"A user requested the following change via Slack:\n\n"
                 f"{message_text}\n\n"
@@ -357,8 +437,8 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
 
             result = agent_service.provision_and_run(
                 gh_token=gh_token,
-                owner=repo.github_owner,
-                repo_name=repo.github_repo_name,
+                owner=matched_repo.github_owner,
+                repo_name=matched_repo.github_repo_name,
                 branch_name=branch_name,
                 base_sha=head_sha,
                 issue_context=issue_context,
@@ -370,7 +450,6 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
             if not result.success:
                 raise RuntimeError(result.error or "Agent run failed")
 
-            # Open PR
             _log(db, run.id, LogLevel.info, "Opening pull request")
             pr_title = message_text[:60]
             if len(message_text) > 60:
@@ -385,12 +464,12 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
 
             pr = github_service.create_pull_request(
                 token=gh_token,
-                owner=repo.github_owner,
-                repo=repo.github_repo_name,
+                owner=matched_repo.github_owner,
+                repo=matched_repo.github_repo_name,
                 title=pr_title,
                 body=pr_body,
                 head=branch_name,
-                base=repo.default_branch,
+                base=matched_repo.default_branch,
             )
             run.pr_number = pr["number"]
             run.pr_url = pr["html_url"]
@@ -399,17 +478,17 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
 
             try:
                 github_service.add_labels(
-                    gh_token, repo.github_owner, repo.github_repo_name,
+                    gh_token, matched_repo.github_owner,
+                    matched_repo.github_repo_name,
                     pr["number"], ["bravey-generated"],
                 )
             except Exception:
                 logger.warning("Failed to add label to PR")
 
-            # Post PR link in thread
             if org.slack_bot_token and channel_id and thread_ts:
                 slack_service.post_thread_message(
                     org.slack_bot_token, channel_id, thread_ts,
-                    f"I've opened a PR: <{run.pr_url}|#{run.pr_number}: {pr_title}>",
+                    f"Done! I've opened a PR: <{run.pr_url}|#{run.pr_number}: {pr_title}>",
                 )
 
             run.status = RunStatus.success
@@ -425,7 +504,6 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
         db.commit()
         _log(db, run.id, LogLevel.error, f"Slack mention pipeline failed: {e}")
 
-        # Post error in thread
         if org.slack_bot_token and channel_id and thread_ts:
             try:
                 slack_service.post_thread_message(

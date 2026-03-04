@@ -464,24 +464,61 @@ def provision_and_run(
 # Slack intent classification
 # ---------------------------------------------------------------------------
 
-def classify_slack_intent(message_text: str) -> str:
-    """Classify a Slack message as 'question' or 'action' using Claude."""
+def classify_slack_intent(message_text: str, thread_context: str = "") -> str:
+    """Classify a Slack message as 'conversation', 'question', or 'action'."""
     client = Anthropic(api_key=settings.anthropic_api_key)
+
+    prompt = message_text
+    if thread_context:
+        prompt = f"Thread context:\n{thread_context}\n\nLatest message: {message_text}"
+
     response = client.messages.create(
         model=MODEL,
         max_tokens=16,
         system=(
-            "You are a classifier. Given a user message, respond with exactly "
-            "one word: 'question' if the user is asking a question about the "
-            "codebase, or 'action' if the user is requesting a code change. "
+            "You are a classifier for a coding assistant bot in Slack. "
+            "Given a user message (and optional thread context), respond with "
+            "exactly one word:\n"
+            "- 'conversation' — greetings, casual chat, follow-up questions, "
+            "clarifications, thank-yous, or anything that doesn't need codebase access\n"
+            "- 'question' — the user is asking a specific question about the codebase "
+            "that requires reading code to answer\n"
+            "- 'action' — the user is explicitly requesting a code change, new feature, "
+            "bug fix, or anything that requires writing/modifying code\n\n"
             "Respond with only that single word, nothing else."
         ),
-        messages=[{"role": "user", "content": message_text}],
+        messages=[{"role": "user", "content": prompt}],
     )
     result = response.content[0].text.strip().lower()
-    if result not in ("question", "action"):
-        return "action"
+    if result not in ("conversation", "question", "action"):
+        return "conversation"
     return result
+
+
+def generate_conversation_reply(
+    message_text: str, thread_context: str = ""
+) -> str:
+    """Generate a conversational reply for casual Slack messages."""
+    client = Anthropic(api_key=settings.anthropic_api_key)
+
+    prompt = message_text
+    if thread_context:
+        prompt = f"Thread context:\n{thread_context}\n\nLatest message: {message_text}"
+
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=512,
+        system=(
+            "You are Bravey, a friendly AI coding assistant in Slack. "
+            "Respond naturally and concisely to the user's message. "
+            "If they greet you, greet them back and briefly mention what you can do "
+            "(answer questions about their codebase, or make code changes and open PRs). "
+            "If they ask a follow-up or clarification, respond helpfully. "
+            "Keep replies short (1-3 sentences). Be warm but professional."
+        ),
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text
 
 
 # ---------------------------------------------------------------------------

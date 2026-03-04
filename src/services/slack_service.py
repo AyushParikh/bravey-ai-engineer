@@ -218,6 +218,31 @@ def post_thread_message(
     return resp.json()
 
 
+def fetch_thread_messages(
+    bot_token: str, channel_id: str, thread_ts: str, limit: int = 20
+) -> list[dict]:
+    """Fetch messages from a Slack thread. Returns list of {user, text} dicts."""
+    resp = httpx.get(
+        f"{SLACK_API_URL}/conversations.replies",
+        params={"channel": channel_id, "ts": thread_ts, "limit": limit},
+        headers={"Authorization": f"Bearer {bot_token}"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        logger.warning("Failed to fetch thread: %s", data.get("error"))
+        return []
+    messages = []
+    for msg in data.get("messages", []):
+        messages.append({
+            "user": msg.get("user", msg.get("bot_id", "unknown")),
+            "text": msg.get("text", ""),
+            "is_bot": "bot_id" in msg,
+        })
+    return messages
+
+
 def update_run_failed(
     bot_token: str,
     channel_id: str,

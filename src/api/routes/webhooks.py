@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import get_db
 from src.config import settings
+from src.database import AsyncSessionLocal
 from src.models.agent_run import AgentRun, RunStatus
 from src.models.organization import Organization
 from src.models.repository import Repository
@@ -631,10 +632,6 @@ async def jira_webhook(
 @router.post("/slack/events")
 async def slack_events(
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    x_slack_request_timestamp: str = Header(alias="X-Slack-Request-Timestamp", default=""),
-    x_slack_signature: str = Header(alias="X-Slack-Signature", default=""),
-    x_slack_retry_num: str | None = Header(alias="X-Slack-Retry-Num", default=None),
 ):
     raw_body = await request.body()
 
@@ -644,9 +641,14 @@ async def slack_events(
     except Exception:
         return Response(status_code=400, content="Invalid payload")
 
-    # Handle URL verification challenge (no signature check needed)
+    # Handle URL verification challenge — must respond fast, no DB needed
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge", "")}
+
+    # Extract headers for the rest of the flow
+    x_slack_request_timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    x_slack_signature = request.headers.get("X-Slack-Signature", "")
+    x_slack_retry_num = request.headers.get("X-Slack-Retry-Num")
 
     # Verify Slack signature
     if settings.slack_signing_secret:
@@ -687,105 +689,107 @@ async def slack_events(
     if not team_id or not channel_id or not message_text:
         return Response(status_code=200, content="OK")
 
-    # Look up organization by Slack team ID
-    result = await db.execute(
-        select(Organization).where(Organization.slack_team_id == team_id)
-    )
-    org = result.scalar_one_or_none()
-    if not org:
-        logger.warning("No org found for Slack team %s", team_id)
-        return Response(status_code=200, content="OK")
-
-    # Match repo from message text
-    repo_result = await db.execute(
-        select(Repository).where(
-            Repository.org_id == org.id,
-            Repository.is_active.is_(True),
+    # DB-dependent processing
+    async with AsyncSessionLocal() as db:
+        # Look up organization by Slack team ID
+        result = await db.execute(
+            select(Organization).where(Organization.slack_team_id == team_id)
         )
-    )
-    repos = repo_result.scalars().all()
+        org = result.scalar_one_or_none()
+        if not org:
+            logger.warning("No org found for Slack team %s", team_id)
+            return Response(status_code=200, content="OK")
 
-    if not repos:
-        logger.error("No active repositories for org %s", org.id)
-        if org.slack_bot_token:
-            try:
-                slack_service.post_thread_message(
-                    org.slack_bot_token, channel_id, thread_ts,
-                    "No active repositories found. Please connect a repo first.",
-                )
-            except Exception:
-                logger.exception("Failed to post Slack thread reply")
-        return Response(status_code=200, content="OK")
+        # Match repo from message text
+        repo_result = await db.execute(
+            select(Repository).where(
+                Repository.org_id == org.id,
+                Repository.is_active.is_(True),
+            )
+        )
+        repos = repo_result.scalars().all()
 
-    # Try to match repo name from message
-    matched_repo = None
-    message_lower = message_text.lower()
-    for repo in repos:
-        if repo.github_repo_name.lower() in message_lower:
-            matched_repo = repo
-            break
+        if not repos:
+            logger.error("No active repositories for org %s", org.id)
+            if org.slack_bot_token:
+                try:
+                    slack_service.post_thread_message(
+                        org.slack_bot_token, channel_id, thread_ts,
+                        "No active repositories found. Please connect a repo first.",
+                    )
+                except Exception:
+                    logger.exception("Failed to post Slack thread reply")
+            return Response(status_code=200, content="OK")
 
-    # If no match and only one repo, use it
-    if not matched_repo and len(repos) == 1:
-        matched_repo = repos[0]
+        # Try to match repo name from message
+        matched_repo = None
+        message_lower = message_text.lower()
+        for repo in repos:
+            if repo.github_repo_name.lower() in message_lower:
+                matched_repo = repo
+                break
 
-    # If ambiguous, ask user to specify
-    if not matched_repo:
-        if org.slack_bot_token:
-            repo_names = ", ".join(f"`{r.github_repo_name}`" for r in repos)
-            try:
-                slack_service.post_thread_message(
-                    org.slack_bot_token, channel_id, thread_ts,
-                    f"I'm not sure which repo you mean. Please mention one of: {repo_names}",
-                )
-            except Exception:
-                logger.exception("Failed to post Slack thread reply")
-        return Response(status_code=200, content="OK")
+        # If no match and only one repo, use it
+        if not matched_repo and len(repos) == 1:
+            matched_repo = repos[0]
 
-    # Check billing/usage limits
-    allowed, reason, plan, usage = await billing_service.check_usage_limit(db, org.id)
-    if not allowed:
-        if org.slack_bot_token:
-            try:
-                slack_service.post_thread_message(
-                    org.slack_bot_token, channel_id, thread_ts,
-                    f"Usage limit reached: {reason}. Please upgrade your plan.",
-                )
-            except Exception:
-                logger.exception("Failed to post Slack thread reply")
-        return Response(status_code=200, content="OK")
+        # If ambiguous, ask user to specify
+        if not matched_repo:
+            if org.slack_bot_token:
+                repo_names = ", ".join(f"`{r.github_repo_name}`" for r in repos)
+                try:
+                    slack_service.post_thread_message(
+                        org.slack_bot_token, channel_id, thread_ts,
+                        f"I'm not sure which repo you mean. Please mention one of: {repo_names}",
+                    )
+                except Exception:
+                    logger.exception("Failed to post Slack thread reply")
+            return Response(status_code=200, content="OK")
 
-    # Create AgentRun
-    run = AgentRun(
-        org_id=org.id,
-        repo_id=matched_repo.id,
-        status=RunStatus.queued,
-        trigger_type="slack_mention",
-        slack_channel_id=channel_id,
-        slack_thread_ts=thread_ts,
-        slack_message_text=message_text,
-    )
-    db.add(run)
-    await db.flush()
+        # Check billing/usage limits
+        allowed, reason, plan, usage = await billing_service.check_usage_limit(db, org.id)
+        if not allowed:
+            if org.slack_bot_token:
+                try:
+                    slack_service.post_thread_message(
+                        org.slack_bot_token, channel_id, thread_ts,
+                        f"Usage limit reached: {reason}. Please upgrade your plan.",
+                    )
+                except Exception:
+                    logger.exception("Failed to post Slack thread reply")
+            return Response(status_code=200, content="OK")
 
-    # Persist webhook event
-    webhook_event = WebhookEvent(
-        org_id=org.id,
-        source="slack",
-        event_type="app_mention",
-        delivery_id=event.get("event_ts", ""),
-        payload=payload,
-        signature_ok=True,
-        processed=True,
-        run_id=run.id,
-    )
-    db.add(webhook_event)
-    await db.commit()
+        # Create AgentRun
+        run = AgentRun(
+            org_id=org.id,
+            repo_id=matched_repo.id,
+            status=RunStatus.queued,
+            trigger_type="slack_mention",
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+            slack_message_text=message_text,
+        )
+        db.add(run)
+        await db.flush()
 
-    # Increment usage
-    await billing_service.increment_usage(db, org.id)
+        # Persist webhook event
+        webhook_event = WebhookEvent(
+            org_id=org.id,
+            source="slack",
+            event_type="app_mention",
+            delivery_id=event.get("event_ts", ""),
+            payload=payload,
+            signature_ok=True,
+            processed=True,
+            run_id=run.id,
+        )
+        db.add(webhook_event)
+        await db.commit()
 
-    # Enqueue to SQS
+        # Increment usage
+        await billing_service.increment_usage(db, org.id)
+
+    # Enqueue to SQS (outside DB session)
     try:
         sqs_service.send_run_message(str(run.id))
     except Exception:

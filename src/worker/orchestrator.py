@@ -411,85 +411,156 @@ def _execute_slack_mention_pipeline(db, run: AgentRun) -> None:
             db.commit()
             _log(db, run.id, LogLevel.info, "Slack Q&A pipeline completed")
 
-        # --- Action: full agent + PR ---
+        # --- Action: full agent + PR (or update existing PR in thread) ---
         else:
             _log(db, run.id, LogLevel.info, "Running action agent")
 
-            slug = re.sub(r"[^a-z0-9]+", "-", message_text[:60].lower()).strip("-")
-            branch_name = f"slack/{slug}"
+            # Check for a previous successful run in the same thread
+            previous_run = None
+            if thread_ts:
+                prev_result = db.execute(
+                    select(AgentRun).where(
+                        AgentRun.org_id == org.id,
+                        AgentRun.slack_thread_ts == thread_ts,
+                        AgentRun.id != run.id,
+                        AgentRun.status == RunStatus.success,
+                        AgentRun.branch_name.isnot(None),
+                        AgentRun.pr_number.isnot(None),
+                    ).order_by(AgentRun.created_at.desc()).limit(1)
+                )
+                previous_run = prev_result.scalar_one_or_none()
 
-            head_sha = github_service.get_default_branch_sha(
-                gh_token, matched_repo.github_owner,
-                matched_repo.github_repo_name, matched_repo.default_branch,
-            )
-            github_service.create_branch(
-                gh_token, matched_repo.github_owner,
-                matched_repo.github_repo_name, branch_name, head_sha,
-            )
-            run.branch_name = branch_name
-            db.commit()
+            if previous_run:
+                # Follow-up: push to existing branch, no new PR
+                _log(db, run.id, LogLevel.info,
+                     f"Found existing PR #{previous_run.pr_number} in thread, updating")
+                branch_name = previous_run.branch_name
+                run.branch_name = branch_name
+                run.pr_number = previous_run.pr_number
+                run.pr_url = previous_run.pr_url
+                run.parent_run_id = previous_run.id
+                db.commit()
 
-            issue_context = (
-                f"A user requested the following change via Slack:\n\n"
-                f"{message_text}\n\n"
-                f"Please implement the changes needed."
-            )
-
-            result = agent_service.provision_and_run(
-                gh_token=gh_token,
-                owner=matched_repo.github_owner,
-                repo_name=matched_repo.github_repo_name,
-                branch_name=branch_name,
-                base_sha=head_sha,
-                issue_context=issue_context,
-            )
-            run.claude_session_id = result.claude_session_id
-            run.claude_summary = result.summary
-            db.commit()
-
-            if not result.success:
-                raise RuntimeError(result.error or "Agent run failed")
-
-            _log(db, run.id, LogLevel.info, "Opening pull request")
-            pr_title = message_text[:60]
-            if len(message_text) > 60:
-                pr_title += "..."
-            pr_body = (
-                f"## Summary\n\n"
-                f"{result.summary or 'No summary available.'}\n\n"
-                f"**Requested via Slack**\n\n"
-                f"---\n"
-                f"*This PR was opened by [Bravey](https://bravey.co)*"
-            )
-
-            pr = github_service.create_pull_request(
-                token=gh_token,
-                owner=matched_repo.github_owner,
-                repo=matched_repo.github_repo_name,
-                title=pr_title,
-                body=pr_body,
-                head=branch_name,
-                base=matched_repo.default_branch,
-            )
-            run.pr_number = pr["number"]
-            run.pr_url = pr["html_url"]
-            run.pr_sha = pr.get("head", {}).get("sha")
-            db.commit()
-
-            try:
-                github_service.add_labels(
+                head_sha = github_service.get_default_branch_sha(
                     gh_token, matched_repo.github_owner,
-                    matched_repo.github_repo_name,
-                    pr["number"], ["bravey-generated"],
+                    matched_repo.github_repo_name, branch_name,
                 )
-            except Exception:
-                logger.warning("Failed to add label to PR")
 
-            if org.slack_bot_token and channel_id and thread_ts:
-                slack_service.post_thread_message(
-                    org.slack_bot_token, channel_id, thread_ts,
-                    f"Done! I've opened a PR: <{run.pr_url}|#{run.pr_number}: {pr_title}>",
+                # Fetch PR diff for context
+                pr_diff = github_service.get_pr_diff(
+                    gh_token, matched_repo.github_owner,
+                    matched_repo.github_repo_name, previous_run.pr_number,
                 )
+                if len(pr_diff) > 50000:
+                    pr_diff = pr_diff[:50000] + "\n... (truncated)"
+
+                issue_context = (
+                    f"You are updating an existing pull request (PR #{previous_run.pr_number}) "
+                    f"on branch `{branch_name}`.\n\n"
+                    f"The user's follow-up request:\n{message_text}\n\n"
+                    f"Current PR diff:\n```diff\n{pr_diff}\n```\n\n"
+                    f"Please make the requested changes on the existing branch. "
+                    f"Do NOT open a new PR — just push commits to the existing branch."
+                )
+
+                result = agent_service.provision_and_run(
+                    gh_token=gh_token,
+                    owner=matched_repo.github_owner,
+                    repo_name=matched_repo.github_repo_name,
+                    branch_name=branch_name,
+                    base_sha=head_sha,
+                    issue_context=issue_context,
+                )
+                run.claude_session_id = result.claude_session_id
+                run.claude_summary = result.summary
+                db.commit()
+
+                if not result.success:
+                    raise RuntimeError(result.error or "Agent run failed")
+
+                if org.slack_bot_token and channel_id and thread_ts:
+                    slack_service.post_thread_message(
+                        org.slack_bot_token, channel_id, thread_ts,
+                        f"Done! I've updated <{run.pr_url}|PR #{run.pr_number}> with the changes.",
+                    )
+
+            else:
+                # New action: create branch + PR
+                slug = re.sub(r"[^a-z0-9]+", "-", message_text[:60].lower()).strip("-")
+                branch_name = f"slack/{slug}"
+
+                head_sha = github_service.get_default_branch_sha(
+                    gh_token, matched_repo.github_owner,
+                    matched_repo.github_repo_name, matched_repo.default_branch,
+                )
+                github_service.create_branch(
+                    gh_token, matched_repo.github_owner,
+                    matched_repo.github_repo_name, branch_name, head_sha,
+                )
+                run.branch_name = branch_name
+                db.commit()
+
+                issue_context = (
+                    f"A user requested the following change via Slack:\n\n"
+                    f"{message_text}\n\n"
+                    f"Please implement the changes needed."
+                )
+
+                result = agent_service.provision_and_run(
+                    gh_token=gh_token,
+                    owner=matched_repo.github_owner,
+                    repo_name=matched_repo.github_repo_name,
+                    branch_name=branch_name,
+                    base_sha=head_sha,
+                    issue_context=issue_context,
+                )
+                run.claude_session_id = result.claude_session_id
+                run.claude_summary = result.summary
+                db.commit()
+
+                if not result.success:
+                    raise RuntimeError(result.error or "Agent run failed")
+
+                _log(db, run.id, LogLevel.info, "Opening pull request")
+                pr_title = message_text[:60]
+                if len(message_text) > 60:
+                    pr_title += "..."
+                pr_body = (
+                    f"## Summary\n\n"
+                    f"{result.summary or 'No summary available.'}\n\n"
+                    f"**Requested via Slack**\n\n"
+                    f"---\n"
+                    f"*This PR was opened by [Bravey](https://bravey.co)*"
+                )
+
+                pr = github_service.create_pull_request(
+                    token=gh_token,
+                    owner=matched_repo.github_owner,
+                    repo=matched_repo.github_repo_name,
+                    title=pr_title,
+                    body=pr_body,
+                    head=branch_name,
+                    base=matched_repo.default_branch,
+                )
+                run.pr_number = pr["number"]
+                run.pr_url = pr["html_url"]
+                run.pr_sha = pr.get("head", {}).get("sha")
+                db.commit()
+
+                try:
+                    github_service.add_labels(
+                        gh_token, matched_repo.github_owner,
+                        matched_repo.github_repo_name,
+                        pr["number"], ["bravey-generated"],
+                    )
+                except Exception:
+                    logger.warning("Failed to add label to PR")
+
+                if org.slack_bot_token and channel_id and thread_ts:
+                    slack_service.post_thread_message(
+                        org.slack_bot_token, channel_id, thread_ts,
+                        f"Done! I've opened a PR: <{run.pr_url}|#{run.pr_number}: {pr_title}>",
+                    )
 
             run.status = RunStatus.success
             run.completed_at = datetime.now(timezone.utc)

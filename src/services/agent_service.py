@@ -20,7 +20,7 @@ GITHUB_HEADERS_BASE = {
 
 MAX_TOOL_TURNS = 50
 MODEL = "claude-sonnet-4-20250514"
-MODEL_FAST = "claude-haiku-4-20250414"
+MODEL_FAST = "claude-haiku-4-5-20251001"
 
 
 

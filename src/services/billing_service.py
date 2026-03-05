@@ -13,8 +13,10 @@ from src.config import settings
 from src.models.agent_run import AgentRun
 from src.models.organization import Organization
 from src.models.plan import Plan
+from src.models.stripe_customer import StripeCustomer
 from src.models.subscription import Subscription, SubscriptionStatus
 from src.models.usage_record import UsageRecord
+from src.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +298,23 @@ async def handle_subscription_event(
         )
     )
     org = result.scalar_one_or_none()
+
+    # Fallback: look up via StripeCustomer → User → Organization
+    if not org:
+        result = await db.execute(
+            select(Organization)
+            .join(User, User.org_id == Organization.id)
+            .join(StripeCustomer, StripeCustomer.user_id == User.id)
+            .where(StripeCustomer.stripe_id == stripe_customer_id)
+        )
+        org = result.scalar_one_or_none()
+        if org:
+            org.stripe_customer_id = stripe_customer_id
+            logger.info(
+                "Backfilled stripe_customer_id on org %s from StripeCustomer table",
+                org.id,
+            )
+
     if not org:
         logger.warning("No org found for Stripe customer %s", stripe_customer_id)
         return

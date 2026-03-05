@@ -11,6 +11,7 @@ from src.models.plan import Plan
 from src.models.subscription import Subscription
 from src.models.usage_record import UsageRecord
 from src.models.stripe_customer import StripeCustomer
+from src.models.feature_flag import FeatureFlag
 
 __all__ = [
     "Base",
@@ -26,4 +27,5 @@ __all__ = [
     "Subscription",
     "UsageRecord",
     "StripeCustomer",
+    "FeatureFlag",
 ]

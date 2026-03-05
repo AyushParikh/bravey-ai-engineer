@@ -3,13 +3,21 @@ from collections.abc import AsyncGenerator
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import AsyncSessionLocal
 from src.models.organization import Organization
 from src.models.user import User
 from src.services import jwt_service
+
+
+async def set_rls_org_context(db: AsyncSession, org_id: uuid.UUID) -> None:
+    """Set the org context for RLS policies (transaction-local)."""
+    await db.execute(
+        text("SELECT set_config('app.current_org_id', :org_id, true)"),
+        {"org_id": str(org_id)},
+    )
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -68,6 +76,7 @@ async def get_current_user_with_org(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Organization not found",
         )
+    await set_rls_org_context(db, org.id)
     return user, org
 
 

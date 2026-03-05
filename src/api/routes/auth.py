@@ -122,6 +122,22 @@ async def github_callback(
         )
         db.add(user)
     else:
+        # If the supabase-created user doesn't have this github_id yet,
+        # check if another user row already owns it and merge.
+        if user.github_id != github_id:
+            result = await db.execute(
+                select(User).where(User.github_id == github_id)
+            )
+            existing = result.scalar_one_or_none()
+            if existing is not None:
+                # Transfer org membership from the old row
+                if existing.org_id and not user.org_id:
+                    user.org_id = existing.org_id
+                if existing.role == "admin":
+                    user.role = existing.role
+                await db.delete(existing)
+                await db.flush()
+
         # Update profile with GitHub info
         user.github_id = github_id
         user.github_login = github_login
